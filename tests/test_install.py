@@ -200,6 +200,21 @@ class InstallTests(unittest.TestCase):
         self.assertFalse(launcher.exists())
         self.assertFalse(any('enable' in c for c in calls))
 
+    def test_operator_interrupt_before_activation_cleans_initial_install(self):
+        _, wheels = self.pair()
+        prefix = self.root / 'prefix'
+        unit_path = self.root / 'unit.service'
+        launcher = self.root / 'wechat-linux'
+        def interrupt(argv, **kwargs):
+            if '--help' in argv:
+                raise KeyboardInterrupt
+        with patch.object(install, 'PREFIX', prefix), patch.object(install, 'LAUNCHER', launcher):
+            with self.assertRaises(KeyboardInterrupt):
+                install._install(self.owner, wheels, interrupt, unit_path)
+        self.assertFalse(prefix.exists())
+        self.assertFalse(unit_path.exists())
+        self.assertFalse(launcher.exists())
+
     def test_failed_activation_preserves_material_for_live_service(self):
         _, wheels = self.pair()
         prefix = self.root / 'prefix'

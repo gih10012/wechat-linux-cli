@@ -282,8 +282,10 @@ def apply(owner: Owner, wheels: tuple[Wheel, Wheel]) -> dict:
 def _install(owner: Owner, wheels: tuple[Wheel, Wheel], run, unit_path: Path) -> dict:
     created_files = []
     activation_started = False
-    PREFIX.mkdir(mode=0o755)
+    prefix_created = False
     try:
+        PREFIX.mkdir(mode=0o755)
+        prefix_created = True
         material = PREFIX / 'wheels'
         material.mkdir(mode=0o700)
         for wheel in wheels:
@@ -308,8 +310,8 @@ def _install(owner: Owner, wheels: tuple[Wheel, Wheel], run, unit_path: Path) ->
         activation_started = True
         # Last mutation: enables boot startup and starts this exact UID instance.
         run(['/usr/bin/systemctl', 'enable', '--now', unit_name(owner)])
-    except Exception:
-        if not activation_started:
+    except BaseException:
+        if not activation_started and prefix_created:
             for created in reversed(created_files):
                 created.unlink()
             shutil.rmtree(PREFIX)

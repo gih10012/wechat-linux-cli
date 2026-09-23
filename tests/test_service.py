@@ -65,6 +65,45 @@ class UnixServiceTests(unittest.TestCase):
         conn.recv.assert_not_called()
         conn.sendall.assert_not_called()
 
+    def test_stopping_rejects_new_key_capture(self):
+        self.server.stopping = True
+        self.assertEqual(self.server.dispatch({'operation': 'capture_keys', 'account': 'me',
+                                               'seconds': 1})['code'], 'SERVICE_STOPPING')
+
+
+class ShutdownTests(unittest.TestCase):
+    def test_stop_drains_pending_backend_and_keeps_status_socket_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'run/control.sock'
+            runner = Mock()
+            runner.state = {'pending': {'request_id': 'unfinished'}}
+            seen = threading.Event()
+            finish = threading.Event()
+            def inspect():
+                seen.set()
+                if finish.is_set():
+                    runner.state['pending'] = None
+                return {'ok': runner.state['pending'] is None}
+            runner.inspect_pending.side_effect = inspect
+            server = service.Service(path, runner)
+            server.stopping = True
+            thread = threading.Thread(target=server.run)
+            thread.start()
+            try:
+                self.assertTrue(seen.wait(2))
+                self.assertTrue(thread.is_alive())
+                self.assertTrue(path.exists())
+                health = client.call({'operation': 'health'}, path)
+                self.assertTrue(health['ok'])
+                self.assertTrue(health['stopping'])
+                finish.set()
+                thread.join(3)
+                self.assertFalse(thread.is_alive())
+                self.assertFalse(path.exists())
+            finally:
+                finish.set()
+                thread.join(3)
+
 
 class PendingOperationTests(unittest.TestCase):
     def test_preinjection_failure_clears_pending_but_keeps_result_for_status(self):

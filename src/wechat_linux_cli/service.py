@@ -237,10 +237,13 @@ class Service:
         if operation == 'health' and set(request) == {'operation'}:
             return {'ok': True, 'version': __version__, 'pid': os.getpid(), 'uid': os.getuid(),
                     'ptrace_capability': native.has_ptrace_capability(),
+                    'stopping': self.stopping,
                     'pending': getattr(self.runner, 'state', {}).get('pending')}
         if operation == 'inspect_pending' and set(request) == {'operation'}:
             return self.runner.inspect_pending()
         if operation == 'capture_keys' and set(request) == {'operation', 'account', 'seconds'}:
+            if self.stopping:
+                return {'ok': False, 'code': 'SERVICE_STOPPING'}
             if (not isinstance(request['account'], str)
                     or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', request['account'])
                     or type(request['seconds']) is not int or not 1 <= request['seconds'] <= 45):
@@ -305,7 +308,19 @@ class Service:
 
     def run(self):
         try:
-            while not self.stopping:
+            while True:
+                if self.stopping:
+                    if not getattr(self.runner, 'state', {}).get('pending'):
+                        break
+                    # Keep the owner-only socket available for read-only status
+                    # while a detached backend finishes. An uncertain result
+                    # must remain pending instead of being killed at shutdown.
+                    try:
+                        self.runner.inspect_pending()
+                    except (OSError, ValueError, KeyError, TypeError):
+                        pass
+                    if not self.runner.state.get('pending'):
+                        break
                 try:
                     conn, _ = self.listener.accept()
                 except socket.timeout:
