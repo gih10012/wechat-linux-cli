@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=65"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wechat-linux-cli"
+version = "0.1.0a1"
+description = "A local CLI for the owner's Linux WeChat client"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Laurieta Temuies"}]
+dependencies = ["pycryptodome>=3.20,<4"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "License :: OSI Approved :: MIT License",
+]
+
+[project.scripts]
+wechat-linux = "wechat_linux_cli.cli:main"
+
+[project.urls]
+Repository = "https://github.com/gih10012/wechat-linux-cli"
+Issues = "https://github.com/gih10012/wechat-linux-cli/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"wechat_linux_cli._native" = ["*.c"]

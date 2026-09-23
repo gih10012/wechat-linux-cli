@@ -1,0 +1,27 @@
+name: Tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install native test prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gdb libzstd1
+      - run: python -m pip install .
+      - name: Unit tests and synthetic native lifecycle checks
+        run: python -m unittest discover -s tests -v
+      - name: Root-to-desktop preparation on synthetic files
+        run: sudo -n env PYTHONPATH="$PWD/src" /usr/bin/python3 -m unittest discover -s tests -p test_native_send_probe.py -v
+      - name: Build standalone wheel
+        run: python -m pip wheel --no-deps --wheel-dir dist .
+      - name: Verify installed entry points and bundled native source
+        working-directory: /tmp
+        run: |
+          python -I -m wechat_linux_cli --version
+          python -I -m wechat_linux_cli.service --help
+          python -I -c "from importlib.resources import files; assert files('wechat_linux_cli._native').joinpath('native_send_helper.c').is_file()"

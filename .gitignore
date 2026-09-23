@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+wheelhouse/
+*.whl
+*.log
+.env
+.env.*
+!.env.example
+# Private credentials, captures and local client databases never belong in Git.
+state/
+native-keys/
+accounts/
+captures/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.pcap
+*.pcapng
