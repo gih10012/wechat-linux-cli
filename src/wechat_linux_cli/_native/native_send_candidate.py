@@ -47,10 +47,26 @@ def classify_poll_stop(syscall_number, previous_instruction, library):
             'library': Path(library or '').name}
 
 
-def classify_futex_stop(syscall_number, previous_instruction, library):
-    accepted = (syscall_number == 202 and previous_instruction == b'\x0f\x05'
+def event_wait_snapshot(pid, tid):
+    """Read only the syscall number of a stable futex waiter before ptrace stops it."""
+    task = Path('/proc')/str(pid)/'task'/str(tid)
+    syscall_before = int(task.joinpath('syscall').read_text().split()[0])
+    wchan = task.joinpath('wchan').read_text().strip()
+    syscall_after = int(task.joinpath('syscall').read_text().split()[0])
+    return {'syscall_number': syscall_after if syscall_before == syscall_after else None,
+            'wchan': wchan, 'comm': task.joinpath('comm').read_text().strip(),
+            'thread_start_time': task.joinpath('stat').read_text().rsplit(')', 1)[1].split()[19]}
+
+
+def classify_futex_stop(syscall_number, previous_instruction, library, wait_before=None):
+    restarted_futex = (syscall_number == 219 and isinstance(wait_before, dict)
+                       and wait_before.get('syscall_number') in (202, 219)
+                       and wait_before.get('wchan') == 'futex_do_wait')
+    accepted = ((syscall_number == 202 or restarted_futex)
+                and previous_instruction == b'\x0f\x05'
                 and Path(library or '').name == 'libc.so.6')
     return {'verified': accepted, 'syscall_number': syscall_number,
+            'restarted_futex': restarted_futex,
             'syscall_instruction_verified': previous_instruction == b'\x0f\x05',
             'library': Path(library or '').name}
 
@@ -199,6 +215,12 @@ def inject_in_gdb(gdb):
                 for breakpoint in gdb.breakpoints() or ():
                     breakpoint.delete()
         else:
+            if cfg.get('sync_call'):
+                event_wait_before = event_wait_snapshot(cfg['pid'], cfg['event_tid'])
+                status['event_wait_before_attach'] = event_wait_before
+                if (event_wait_before['syscall_number'] not in (202, 219)
+                        or event_wait_before['wchan'] != 'futex_do_wait'):
+                    raise ValueError('event_thread_not_in_stable_futex_wait_before_attach: no call made')
             gdb.execute('attach ' + str(cfg['pid']), to_string=True)
         status['attached'] = True
         inferior = gdb.selected_inferior()
@@ -269,11 +291,17 @@ def inject_in_gdb(gdb):
             if len(matching) != 1:
                 raise ValueError('event_thread_identity_mismatch: no high-level call made')
             event_thread = matching[0]
+            if not cfg.get('fixture'):
+                task = Path('/proc')/str(inferior.pid)/'task'/str(event_tid)
+                current_thread_start = task.joinpath('stat').read_text().rsplit(')', 1)[1].split()[19]
+                if current_thread_start != event_wait_before['thread_start_time']:
+                    raise ValueError('event_thread_replaced_after_wait_snapshot: no high-level call made')
             event_thread.switch()
             pc = int(gdb.parse_and_eval('$pc'))
             status['event_idle_check'] = classify_futex_stop(
                 int(gdb.parse_and_eval('$orig_rax')),
-                bytes(inferior.read_memory(pc - 2, 2)), gdb.solib_name(pc))
+                bytes(inferior.read_memory(pc - 2, 2)), gdb.solib_name(pc),
+                None if cfg.get('fixture') else event_wait_before)
             if not status['event_idle_check']['verified']:
                 raise ValueError('event_thread_not_idle_in_futex: no high-level call made')
             status['event_tid'] = event_tid

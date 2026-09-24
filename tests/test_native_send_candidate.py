@@ -24,10 +24,48 @@ class NativeCandidateTests(unittest.TestCase):
     def test_event_thread_must_be_stopped_in_libc_futex(self):
         self.assertTrue(candidate.classify_futex_stop(202, b'\x0f\x05',
                                                        '/usr/lib/libc.so.6')['verified'])
+        before = {'syscall_number': 202, 'wchan': 'futex_do_wait'}
+        restarted = candidate.classify_futex_stop(219, b'\x0f\x05',
+                                                   '/usr/lib/libc.so.6', before)
+        self.assertTrue(restarted['verified'])
+        self.assertTrue(restarted['restarted_futex'])
         for syscall, code, library in ((7, b'\x0f\x05', '/usr/lib/libc.so.6'),
                                       (202, b'xx', '/usr/lib/libc.so.6'),
-                                      (202, b'\x0f\x05', '/tmp/other.so')):
+                                      (202, b'\x0f\x05', '/tmp/other.so'),
+                                      (219, b'\x0f\x05', '/usr/lib/libc.so.6')):
             self.assertFalse(candidate.classify_futex_stop(syscall, code, library)['verified'])
+        for evidence in ({'syscall_number': 271, 'wchan': 'futex_do_wait'},
+                         {'syscall_number': 202, 'wchan': 'poll_schedule_timeout'},
+                         {'syscall_number': None, 'wchan': 'futex_do_wait'}):
+            self.assertFalse(candidate.classify_futex_stop(
+                219, b'\x0f\x05', '/usr/lib/libc.so.6', evidence)['verified'])
+
+    def test_event_wait_snapshot_reads_a_real_blocked_futex_thread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            fixture = work/'fixture'
+            subprocess.run(['gcc', '-O0', '-pthread',
+                            str(Path(__file__).with_name('native_send_fixture.c')),
+                            '-o', str(fixture)], check=True, capture_output=True, timeout=30)
+            ready = work/'main-resumed'
+            process = subprocess.Popen([str(fixture)], env={**os.environ,
+                                        'NCUT_TEST_FUTEX': '1',
+                                        'NCUT_TEST_RESUMED_PATH': str(ready)})
+            try:
+                deadline = time.monotonic() + 3
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertTrue(ready.exists())
+                threads = [int(path.name) for path in (Path('/proc')/str(process.pid)/'task').iterdir()
+                           if int(path.name) != process.pid]
+                self.assertEqual(len(threads), 1)
+                snapshot = candidate.event_wait_snapshot(process.pid, threads[0])
+                self.assertEqual(snapshot['syscall_number'], 202)
+                self.assertEqual(snapshot['wchan'], 'futex_do_wait')
+                self.assertTrue(int(snapshot['thread_start_time']) > 0)
+            finally:
+                process.terminate()
+                process.wait(timeout=5)
 
     def test_only_proven_pre_call_failure_can_be_archived_for_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
