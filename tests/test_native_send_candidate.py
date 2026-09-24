@@ -21,6 +21,14 @@ class NativeCandidateTests(unittest.TestCase):
                                       (271, b'\x0f\x05', '/tmp/unrelated.so')):
             self.assertFalse(candidate.classify_poll_stop(syscall, code, library)['verified'])
 
+    def test_event_thread_must_be_stopped_in_libc_futex(self):
+        self.assertTrue(candidate.classify_futex_stop(202, b'\x0f\x05',
+                                                       '/usr/lib/libc.so.6')['verified'])
+        for syscall, code, library in ((7, b'\x0f\x05', '/usr/lib/libc.so.6'),
+                                      (202, b'xx', '/usr/lib/libc.so.6'),
+                                      (202, b'\x0f\x05', '/tmp/other.so')):
+            self.assertFalse(candidate.classify_futex_stop(syscall, code, library)['verified'])
+
     def test_only_proven_pre_call_failure_can_be_archived_for_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -73,6 +81,10 @@ class NativeCandidateTests(unittest.TestCase):
         self.run_debugger_fixture(False)
 
     @unittest.skipUnless(shutil.which('gdb'), 'GDB is required for real debugger fixture')
+    def test_synchronous_highlevel_call_selects_observed_futex_thread(self):
+        self.run_debugger_fixture(False, launch_symbol='ncut_highlevel_sync', sync=True)
+
+    @unittest.skipUnless(shutil.which('gdb'), 'GDB is required for real debugger fixture')
     def test_real_poll_syscall_is_recognized_without_function_name(self):
         self.run_debugger_fixture(False, poll=True)
 
@@ -80,7 +92,7 @@ class NativeCandidateTests(unittest.TestCase):
     def test_other_thread_signal_during_loader_never_arms_send(self):
         self.run_debugger_fixture(True)
 
-    def run_debugger_fixture(self, interrupt, poll=False):
+    def run_debugger_fixture(self, interrupt, poll=False, launch_symbol=None, sync=False):
         if os.geteuid() == 0:
             self.skipTest('Run this synthetic debugger test as ordinary user')
         with tempfile.TemporaryDirectory() as tmp:
@@ -96,6 +108,11 @@ class NativeCandidateTests(unittest.TestCase):
                    'binary_copy': str(fixture), 'helper': str(helper),
                    'load_bias': 1, 'send': True, 'payload_hex': candidate.make_payload(1700000000).hex(),
                    'injection_result': str(work/'injection.json'), 'worker_result': str(work/'worker.json')}
+            if sync:
+                cfg.update({'sync_call': True, 'futex_fixture': True,
+                            'event_tid': 'fixture_futex'})
+            if launch_symbol:
+                cfg['launch_symbol'] = launch_symbol
             result = candidate.run_injection(cfg, work)
             try:
                 if interrupt:
@@ -109,7 +126,16 @@ class NativeCandidateTests(unittest.TestCase):
                     return
                 self.assertEqual(result.get('status'), 'trial_finished', (result, (work/'debugger.log').read_text()))
                 self.assertTrue(result['detached'])
-                self.assertTrue(result['armed'])
+                self.assertEqual(result['armed'], not sync)
+                if sync:
+                    self.assertTrue(result['direct_event_thread_call'])
+                    self.assertTrue(result['event_idle_check']['verified'])
+                    self.assertTrue(result['worker']['worker_done'])
+                    self.assertTrue(result['worker']['native_roundtrip_verified'])
+                    time.sleep(.2)
+                    self.assertTrue(candidate.process_running_untraced(result['inferior_pid']))
+                    self.assertTrue((work/'main-resumed').exists())
+                    return
                 if poll:
                     self.assertTrue(result['idle_check']['verified'])
                     self.assertEqual(result['idle_check']['syscall_name'], 'poll')

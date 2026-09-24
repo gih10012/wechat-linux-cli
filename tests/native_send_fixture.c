@@ -3,12 +3,20 @@
 #include <assert.h>
 #include <signal.h>
 #include <poll.h>
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#include <time.h>
 
 #ifdef NCUT_FIXTURE_DSO
 static void *interrupt_loader(void *unused) {
     (void)unused;
     usleep(20000);
     raise(SIGUSR1); /* Another selected thread interrupts main's inferior call. */
+    return NULL;
+}
+static void *sync_completion(void *unused) {
+    (void)unused;
+    usleep(20000);
     return NULL;
 }
 __attribute__((constructor)) static void loader_fixture(void) {
@@ -94,9 +102,43 @@ int ncut_test_launch(uintptr_t base, const void *data, size_t length, const char
     if (!code) pthread_detach(thread);
     return code;
 }
+#ifdef NCUT_FIXTURE_DSO
+__attribute__((visibility("default")))
+int ncut_highlevel_sync(uintptr_t base, const void *data, size_t length,
+                        const char *result, int send) {
+    (void)base; (void)data; (void)length; (void)send;
+    /* A real high-level call awaits work on another native thread. */
+    pthread_t completion;
+    int code = pthread_create(&completion, NULL, sync_completion, NULL);
+    if (code) return code;
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 5;
+    code = pthread_timedjoin_np(completion, NULL, &deadline);
+    if (code) return code;
+    if (started++) return EALREADY;
+    output_fd = open(result, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (output_fd < 0) return errno;
+    parsed = 1;
+    worker_done = 1;
+    report_locked();
+    return 0;
+}
+#endif
 __attribute__((noinline)) void fixture_idle(void) { asm volatile("" ::: "memory"); }
+static int futex_word;
+static void *fixture_futex(void *unused) {
+    (void)unused;
+    for (;;) (void)syscall(SYS_futex, &futex_word, FUTEX_WAIT_PRIVATE, 0, NULL, NULL, 0);
+    return NULL;
+}
 int main(int argc, char **argv) {
     if (argc == 1) {
+        if (getenv("NCUT_TEST_FUTEX")) {
+            pthread_t event_thread;
+            assert(!pthread_create(&event_thread, NULL, fixture_futex, NULL));
+            usleep(100000);
+        }
         fixture_idle();
         const char *path = getenv("NCUT_TEST_RESUMED_PATH");
         if (path) {
