@@ -47,6 +47,30 @@ def classify_poll_stop(syscall_number, previous_instruction, library):
             'library': Path(library or '').name}
 
 
+def event_wait_snapshot(pid, tid):
+    """Read only the syscall number of a stable futex waiter before ptrace stops it."""
+    task = Path('/proc')/str(pid)/'task'/str(tid)
+    syscall_before = int(task.joinpath('syscall').read_text().split()[0])
+    wchan = task.joinpath('wchan').read_text().strip()
+    syscall_after = int(task.joinpath('syscall').read_text().split()[0])
+    return {'syscall_number': syscall_after if syscall_before == syscall_after else None,
+            'wchan': wchan, 'comm': task.joinpath('comm').read_text().strip(),
+            'thread_start_time': task.joinpath('stat').read_text().rsplit(')', 1)[1].split()[19]}
+
+
+def classify_futex_stop(syscall_number, previous_instruction, library, wait_before=None):
+    restarted_futex = (syscall_number == 219 and isinstance(wait_before, dict)
+                       and wait_before.get('syscall_number') in (202, 219)
+                       and wait_before.get('wchan') == 'futex_do_wait')
+    accepted = ((syscall_number == 202 or restarted_futex)
+                and previous_instruction == b'\x0f\x05'
+                and Path(library or '').name == 'libc.so.6')
+    return {'verified': accepted, 'syscall_number': syscall_number,
+            'restarted_futex': restarted_futex,
+            'syscall_instruction_verified': previous_instruction == b'\x0f\x05',
+            'library': Path(library or '').name}
+
+
 def varint(number):
     if not 0 <= number <= 0xffffffff:
         raise ValueError('uint32 out of range')
@@ -88,11 +112,12 @@ def save(path, value):
     temp.replace(path)
 
 
-def compile_helper(work, uid=None, gid=None):
+def compile_helper(work, uid=None, gid=None, source=None):
     output = work/'helper.so'
+    source = HERE/'native_send_helper.c' if source is None else Path(source)
     identity = {'user': uid, 'group': gid, 'extra_groups': []} if uid is not None and os.geteuid() == 0 else {}
     subprocess.run(['/usr/bin/gcc', '-shared', '-fPIC', '-O2', '-std=c11', '-Wall',
-                    '-Wextra', '-Werror', '-pthread', str(HERE/'native_send_helper.c'),
+                    '-Wextra', '-Werror', '-pthread', str(source),
                     '-o', str(output)], check=True, capture_output=True, timeout=30, **identity)
     output.chmod(0o600)
     return output
@@ -105,6 +130,7 @@ def inject_in_gdb(gdb):
     output = Path(cfg['injection_result'])
     allocated = 0
     call_thread = None
+    loader_thread = None
     call_origin = None
 
     def inferior_call(expression, evaluate=True):
@@ -189,10 +215,20 @@ def inject_in_gdb(gdb):
                 for breakpoint in gdb.breakpoints() or ():
                     breakpoint.delete()
         else:
+            if cfg.get('sync_call'):
+                event_wait_before = event_wait_snapshot(cfg['pid'], cfg['event_tid'])
+                status['event_wait_before_attach'] = event_wait_before
+                if (event_wait_before['syscall_number'] not in (202, 219)
+                        or event_wait_before['wchan'] != 'futex_do_wait'):
+                    raise ValueError('event_thread_not_in_stable_futex_wait_before_attach: no call made')
             gdb.execute('attach ' + str(cfg['pid']), to_string=True)
         status['attached'] = True
         inferior = gdb.selected_inferior()
         status['inferior_pid'] = inferior.pid
+        if cfg.get('start_time'):
+            current_start = (Path('/proc')/str(inferior.pid)/'stat').read_text().rsplit(')', 1)[1].split()[19]
+            if current_start != str(cfg['start_time']):
+                raise ValueError('client_start_time_changed: no inferior call made')
         gdb.execute('sharedlibrary libc', to_string=True)
         gdb.execute('set scheduler-locking off', to_string=True)
         if not cfg.get('fixture') or cfg.get('poll_fixture'):
@@ -215,10 +251,17 @@ def inject_in_gdb(gdb):
                 raise ValueError('network_service_chain_mismatch')
             status['network_service_chain_verified'] = True
         call_thread = gdb.selected_thread()
+        loader_thread = call_thread
         data = bytes.fromhex(cfg['payload_hex'])
         helper = os.fsencode(cfg['helper']) + b'\0'
         result = os.fsencode(cfg['worker_result']) + b'\0'
-        symbol = (b'ncut_test_launch' if cfg.get('fixture') else b'ncut_launch') + b'\0'
+        launch_symbol = cfg.get('launch_symbol',
+                                'ncut_test_launch' if cfg.get('fixture') else 'ncut_launch')
+        if launch_symbol not in ('ncut_launch', 'ncut_test_launch', 'ncut_highlevel_sync'):
+            raise ValueError('Unsupported launch symbol')
+        if bool(cfg.get('sync_call')) != (launch_symbol == 'ncut_highlevel_sync'):
+            raise ValueError('Synchronous call and launcher must be paired')
+        symbol = launch_symbol.encode('ascii') + b'\0'
         total = helper + result + symbol + data
         # Only loader/allocation/thread launch calls occur under the debugger.
         status['status'] = 'loader_calls'
@@ -236,6 +279,33 @@ def inject_in_gdb(gdb):
         launcher = int(inferior_call(f'(void *)dlsym((void *){handle}, (char *){symbol_ptr})'))
         if not launcher:
             raise ValueError('helper_symbol_missing')
+        if cfg.get('sync_call'):
+            event_tid = cfg.get('event_tid')
+            if cfg.get('fixture') and event_tid == 'fixture_futex':
+                candidates = [thread.ptid[1] for thread in inferior.threads()
+                              if thread.ptid[1] != inferior.pid]
+                event_tid = candidates[0] if len(candidates) == 1 else None
+            if not isinstance(event_tid, int) or event_tid <= 0:
+                raise ValueError('event_thread_identity_missing: no high-level call made')
+            matching = [thread for thread in inferior.threads() if thread.ptid[1] == event_tid]
+            if len(matching) != 1:
+                raise ValueError('event_thread_identity_mismatch: no high-level call made')
+            event_thread = matching[0]
+            if not cfg.get('fixture'):
+                task = Path('/proc')/str(inferior.pid)/'task'/str(event_tid)
+                current_thread_start = task.joinpath('stat').read_text().rsplit(')', 1)[1].split()[19]
+                if current_thread_start != event_wait_before['thread_start_time']:
+                    raise ValueError('event_thread_replaced_after_wait_snapshot: no high-level call made')
+            event_thread.switch()
+            pc = int(gdb.parse_and_eval('$pc'))
+            status['event_idle_check'] = classify_futex_stop(
+                int(gdb.parse_and_eval('$orig_rax')),
+                bytes(inferior.read_memory(pc - 2, 2)), gdb.solib_name(pc),
+                None if cfg.get('fixture') else event_wait_before)
+            if not status['event_idle_check']['verified']:
+                raise ValueError('event_thread_not_idle_in_futex: no high-level call made')
+            status['event_tid'] = event_tid
+            call_thread = event_thread
         status['launch_call_entered'] = True
         save(output, status)
         expression = (f'((int (*)(unsigned long,void*,unsigned long,char*,int)){launcher})'
@@ -255,6 +325,8 @@ def inject_in_gdb(gdb):
         if status['attached']:
             if allocated:
                 try:
+                    if call_origin is None and loader_thread is not None:
+                        call_thread = loader_thread
                     inferior_call(f'call (void)free((void *){allocated})', evaluate=False)
                 except Exception:
                     status['scratch_release_unverified'] = True
@@ -290,6 +362,8 @@ def run_injection(cfg, work):
         env['NCUT_TEST_RESUMED_PATH'] = str(work/'main-resumed')
         if cfg.get('poll_fixture'):
             env['NCUT_TEST_POLL'] = '1'
+        if cfg.get('futex_fixture'):
+            env['NCUT_TEST_FUTEX'] = '1'
     if cfg.get('fixture') and cfg.get('interrupt_loader'):
         env['NCUT_TEST_INTERRUPT_LOADER'] = '1'
     command = f'python __file__={script!r}; exec(compile(open({script!r}).read(), {script!r}, "exec"))'
@@ -310,11 +384,15 @@ def run_injection(cfg, work):
     if not cfg.get('fixture') and not process_running_untraced(cfg['pid'], cfg['start_time']):
         result['status'] = 'detach_not_verified'
         return result
-    arm = Path(cfg['worker_result'] + '.arm')
-    arm.touch(mode=0o600, exist_ok=False)
-    if 'uid' in cfg:
-        os.chown(arm, cfg['uid'], cfg['gid'])
-    result['armed'] = True
+    if cfg.get('sync_call'):
+        result['armed'] = False
+        result['direct_event_thread_call'] = True
+    else:
+        arm = Path(cfg['worker_result'] + '.arm')
+        arm.touch(mode=0o600, exist_ok=False)
+        if 'uid' in cfg:
+            os.chown(arm, cfg['uid'], cfg['gid'])
+        result['armed'] = True
     deadline = time.monotonic() + 45
     while time.monotonic() < deadline:
         try:
