@@ -28,9 +28,12 @@ class HighLevelCandidateTests(unittest.TestCase):
     def test_native_lifecycle_preflight_send_and_manager_rejection(self):
         with tempfile.TemporaryDirectory() as temp:
             binary = Path(temp)/'fixture'
-            subprocess.run(['/usr/bin/gcc', '-O2', '-std=c11', '-Wall', '-Wextra',
-                            '-Werror', '-pthread', str(ROOT/'tests/native_highlevel_fixture.c'),
-                            '-o', str(binary)], check=True, capture_output=True, timeout=30)
+            compiler = subprocess.run(['/usr/bin/gcc', '-O2', '-std=c11', '-Wall', '-Wextra',
+                                       '-Werror', '-pthread',
+                                       str(ROOT/'tests/native_highlevel_fixture.c'),
+                                       '-o', str(binary)], capture_output=True, text=True,
+                                      timeout=30)
+            self.assertEqual(compiler.returncode, 0, compiler.stderr)
             completed = subprocess.run([str(binary)], check=True, capture_output=True,
                                        text=True, timeout=10)
             self.assertIn('highlevel fixture passed', completed.stdout)
