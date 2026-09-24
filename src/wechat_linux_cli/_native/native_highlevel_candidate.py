@@ -127,7 +127,9 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
     result['request_id'] = request_id
     worker = result.get('worker', {})
     result['highlevel_preflight_verified'] = bool(
-        result.get('detached') and worker.get('worker_done') and not worker.get('failure')
+        result.get('status') == 'trial_finished' and result.get('detached')
+        and result['client_running_untraced'] and worker.get('worker_done')
+        and not worker.get('failure')
         and worker.get('manager_verified') and worker.get('request_constructed'))
     result['native_submission_entered'] = bool(send and worker.get('submission_entered'))
     result['local_insert_result_success'] = (bool(worker.get('result_success'))
