@@ -32,12 +32,13 @@ static pthread_mutex_t state_lock = PTHREAD_MUTEX_INITIALIZER;
 static int started, output_fd = -1, should_send;
 static int worker_done, manager_verified, request_constructed;
 static int submission_entered, result_returned, result_success, failure;
+static int report_failed;
 static uint32_t result_code0, result_code1;
 static unsigned char payload[2048];
 static size_t payload_size;
 
-static void report_locked(void) {
-    if (output_fd < 0) return;
+static int report_locked(void) {
+    if (output_fd < 0) return 0;
     char json[512];
     int length = snprintf(json, sizeof(json),
         "{\"worker_done\":%s,\"live_callbacks\":0,\"manager_verified\":%s,"
@@ -48,16 +49,19 @@ static void report_locked(void) {
         request_constructed ? "true" : "false", submission_entered ? "true" : "false",
         result_returned ? "true" : "false", result_success ? "true" : "false",
         result_code0, result_code1, failure);
-    if (length > 0 && (size_t)length < sizeof(json) &&
-        pwrite(output_fd, json, (size_t)length, 0) == length)
-        (void)ftruncate(output_fd, length);
+    if (length <= 0 || (size_t)length >= sizeof(json) ||
+        pwrite(output_fd, json, (size_t)length, 0) != length ||
+        ftruncate(output_fd, length) != 0 || fsync(output_fd) != 0)
+        report_failed = 1;
     if (worker_done) { close(output_fd); output_fd = -1; }
+    return !report_failed;
 }
 
-static void report(void) {
+static int report(void) {
     pthread_mutex_lock(&state_lock);
-    report_locked();
+    int ok = report_locked();
     pthread_mutex_unlock(&state_lock);
+    return ok;
 }
 
 static void perform_native(void) {
@@ -97,7 +101,7 @@ static void perform_native(void) {
 
     if (should_send) {
         submission_entered = 1; /* Persist before the only possibly sending call. */
-        report();
+        if (!report()) { failure = 7; goto release; }
         api.send(result, manager.object, &request);
         result_returned = 1;
         memcpy(&result_code0, result, sizeof(result_code0));
@@ -148,7 +152,7 @@ static int initialize(uintptr_t base, const void *data, size_t length,
     memcpy(payload, data, length);
     payload_size = length;
     should_send = send;
-    report();
+    if (!report()) { close(output_fd); output_fd = -1; return EIO; }
     return 0;
 }
 

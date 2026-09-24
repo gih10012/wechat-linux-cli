@@ -50,13 +50,15 @@ static void fake_shared_destroy(Shared *item) {
 }
 
 static void run_case(int send, int mismatched_manager, int expected_failure,
-                     int expected_requests, int expected_sends, int expected_releases) {
+                     int expected_requests, int expected_sends, int expected_releases,
+                     int bad_output) {
     char report_path[] = "/tmp/wechat-highlevel-fixture-report-XXXXXX";
-    output_fd = mkstemp(report_path);
+    output_fd = bad_output ? open("/dev/full", O_WRONLY) : mkstemp(report_path);
     if (output_fd < 0) abort();
     releases = requests = sends = result_destroys = recipient_assigns = text_assigns = 0;
     worker_done = manager_verified = request_constructed = 0;
     submission_entered = result_returned = result_success = failure = 0;
+    report_failed = 0;
     result_code0 = result_code1 = 0;
     bad_manager = mismatched_manager;
     should_send = send;
@@ -68,18 +70,20 @@ static void run_case(int send, int mismatched_manager, int expected_failure,
         sends != expected_sends || releases != expected_releases ||
         result_destroys != expected_sends ||
         recipient_assigns != expected_requests || text_assigns != expected_requests ||
-        submission_entered != expected_sends || result_returned != expected_sends ||
+        submission_entered != (bad_output ? 1 : expected_sends) ||
+        result_returned != expected_sends ||
         result_success != expected_sends) abort();
-    unlink(report_path);
+    if (!bad_output) unlink(report_path);
 }
 
 int main(void) {
     image_base = 0;
     api = (NativeApi){fake_app, fake_services, fake_manager, fake_request,
                       fake_assign, fake_send, fake_result_destroy, fake_shared_destroy};
-    run_case(0, 0, 0, 1, 0, 4);
-    run_case(1, 0, 0, 1, 1, 4);
-    run_case(1, 1, 4, 0, 0, 3);
+    run_case(0, 0, 0, 1, 0, 4, 0);
+    run_case(1, 0, 0, 1, 1, 4, 0);
+    run_case(1, 1, 4, 0, 0, 3, 0);
+    run_case(1, 0, 7, 1, 0, 4, 1);
     puts("highlevel fixture passed");
     return 0;
 }
