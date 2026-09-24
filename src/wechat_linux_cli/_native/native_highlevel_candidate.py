@@ -105,6 +105,9 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
         result = {'status': 'local_failure', 'stage': stage,
                   'error': str(error)[:500] if isinstance(error, ValueError) else type(error).__name__,
                   'automatic_retry_allowed': False}
+    except KeyboardInterrupt:
+        result = {'status': 'operator_interrupt', 'stage': stage,
+                  'automatic_retry_allowed': False}
     finally:
         debugger_live = False
         try:
