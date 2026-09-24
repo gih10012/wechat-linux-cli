@@ -1,3 +1,4 @@
+#define NCUT_ALLOW_HIGHLEVEL_SEND 1
 #include "../src/wechat_linux_cli/_native/native_highlevel_helper.c"
 
 static unsigned char app_object[16], services_object[16], manager_object[0x910];

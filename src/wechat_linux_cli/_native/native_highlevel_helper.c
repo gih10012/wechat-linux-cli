@@ -14,6 +14,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifndef NCUT_ALLOW_HIGHLEVEL_SEND
+#define NCUT_ALLOW_HIGHLEVEL_SEND 0
+#endif
+
 typedef struct { void *object; void *control; } Shared;
 typedef struct {
     void (*current_app)(Shared *);
@@ -125,6 +129,7 @@ static int initialize(uintptr_t base, const void *data, size_t length,
     if (!base || !data || length < 6 || length > sizeof(payload) ||
         (send != 0 && send != 1) ||
         strlen(result_path) >= PATH_MAX) return EINVAL;
+    if (send && !NCUT_ALLOW_HIGHLEVEL_SEND) return ENOSYS;
     size_t recipient_size = (size_t)((const unsigned char *)data)[0] |
                             ((size_t)((const unsigned char *)data)[1] << 8);
     size_t text_size = (size_t)((const unsigned char *)data)[2] |

@@ -1,3 +1,5 @@
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -14,6 +16,24 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class HighLevelCandidateTests(unittest.TestCase):
+    def test_production_helper_rejects_send_before_target_access(self):
+        with tempfile.TemporaryDirectory() as temp:
+            library = Path(temp)/'helper.so'
+            compiler = subprocess.run(
+                ['/usr/bin/gcc', '-shared', '-fPIC', '-O2', '-std=c11', '-Wall',
+                 '-Wextra', '-Werror', '-pthread',
+                 str(ROOT/'src/wechat_linux_cli/_native/native_highlevel_helper.c'),
+                 '-o', str(library)], capture_output=True, text=True, timeout=30)
+            self.assertEqual(compiler.returncode, 0, compiler.stderr)
+            call = ctypes.CDLL(str(library)).ncut_highlevel_sync
+            call.argtypes = (ctypes.c_ulong, ctypes.c_char_p, ctypes.c_size_t,
+                             ctypes.c_char_p, ctypes.c_int)
+            call.restype = ctypes.c_int
+            report = Path(temp)/'unexpected-report.json'
+            self.assertEqual(call(1, b'\x01\x00\x01\x00ab', 6,
+                                  str(report).encode(), 1), errno.ENOSYS)
+            self.assertFalse(report.exists())
+
     def test_payload_is_bounded_exact_native_id_and_utf8(self):
         payload = native_highlevel_candidate.payload_for('filehelper', '中文\n✅')
         self.assertEqual(int.from_bytes(payload[:2], 'little'), len(b'filehelper'))
