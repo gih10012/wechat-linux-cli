@@ -54,7 +54,11 @@ static size_t payload_size;
 /* The pinned manager getter dereferences FS-0x78 without a null check.
  * Read the active coroutine only; never fabricate or change client TLS. */
 static int active_context_valid(const Shared *context) {
-    return context && context->object && context->control;
+    if (!context || !context->object || !context->control) return 0;
+    /* 4537200 cannot lock a control block whose strong-owner count is -1.
+     * This is a rejection check, not a replacement for the client's lock. */
+    return __atomic_load_n((intptr_t *)((unsigned char *)context->control + 8),
+                           __ATOMIC_ACQUIRE) != -1;
 }
 static int native_context_available(void) {
     unsigned long fs_base = 0;

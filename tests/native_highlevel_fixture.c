@@ -198,6 +198,9 @@ int main(void) {
     if (active_context_valid(&context)) abort();
     context.object = app_object;
     if (!active_context_valid(&context)) abort();
+    *(intptr_t *)(app_object + 8) = -1;
+    if (active_context_valid(&context)) abort();
+    *(intptr_t *)(app_object + 8) = 0;
     context_available = fake_context_available;
     image_base = 0;
     api = (NativeApi){fake_app, fake_services, fake_manager, fake_request,
