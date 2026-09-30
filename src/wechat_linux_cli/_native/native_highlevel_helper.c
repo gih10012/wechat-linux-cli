@@ -53,11 +53,12 @@ static int report_locked(void) {
     if (output_fd < 0) return 0;
     char json[512];
     int length = snprintf(json, sizeof(json),
-        "{\"worker_done\":%s,\"live_callbacks\":%d,\"manager_verified\":%s,"
+        "{\"worker_done\":%s,\"live_callbacks\":%d,\"dispatch_pending\":%s,\"manager_verified\":%s,"
         "\"request_constructed\":%s,\"submission_entered\":%s,"
         "\"result_returned\":%s,\"result_success\":%s,"
         "\"result_code0\":%u,\"result_code1\":%u,\"failure\":%d}\n",
-        worker_done ? "true" : "false", live_callbacks, manager_verified ? "true" : "false",
+        worker_done && !dispatch_pending ? "true" : "false", live_callbacks,
+        dispatch_pending ? "true" : "false", manager_verified ? "true" : "false",
         request_constructed ? "true" : "false", submission_entered ? "true" : "false",
         result_returned ? "true" : "false", result_success ? "true" : "false",
         result_code0, result_code1, failure);
@@ -232,7 +233,6 @@ static int enqueue_returned, task_invoked;
 static Shared finish_dispatch_locked(void) {
     Shared release = {0};
     if (enqueue_returned && !live_callbacks) {
-        dispatch_pending = 0;
         if (!task_invoked) { if (!failure) failure = 11; worker_done = 1; }
         release = retained_dispatcher;
         retained_dispatcher = (Shared){0};
@@ -241,13 +241,22 @@ static Shared finish_dispatch_locked(void) {
     return release;
 }
 
+static void finish_dispatch_release(Shared *release) {
+    if (!release->control) return;
+    api.shared_destroy(release);
+    pthread_mutex_lock(&state_lock);
+    dispatch_pending = 0;
+    report_locked();
+    pthread_mutex_unlock(&state_lock);
+}
+
 static void task_destroy(TaskCallback *self) {
     (void)self;
     pthread_mutex_lock(&state_lock);
     --live_callbacks;
     Shared release = finish_dispatch_locked();
     pthread_mutex_unlock(&state_lock);
-    if (release.control) api.shared_destroy(&release);
+    finish_dispatch_release(&release);
 }
 static void task_delete(TaskCallback *self) { task_destroy(self); free(self); }
 static TaskCallback *task_clone(const TaskCallback *self) {
@@ -316,7 +325,7 @@ static int enqueue_prepared(void) {
     enqueue_returned = 1;
     Shared release = finish_dispatch_locked();
     pthread_mutex_unlock(&state_lock);
-    if (release.control) api.shared_destroy(&release);
+    finish_dispatch_release(&release);
     return persisted ? 0 : EIO;
 }
 

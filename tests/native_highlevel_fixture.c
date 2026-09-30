@@ -8,6 +8,8 @@ static int releases, requests, sends, result_destroys, recipient_assigns, text_a
 static int bad_manager;
 static _Thread_local int active_context;
 static int require_context;
+static void *observed_dispatcher;
+static int dispatcher_release_checks;
 
 static void fake_app(Shared *out) {
     out->object = app_object; out->control = app_object;
@@ -50,6 +52,17 @@ static void fake_result_destroy(void *out) {
 }
 static void fake_shared_destroy(Shared *item) {
     if (!item->object || !item->control) abort();
+    if (item->object == observed_dispatcher) {
+        if (dispatch_pending) {
+            char json[512] = {0};
+            if (output_fd < 0) abort();
+            if (!report_failed &&
+                (pread(output_fd, json, sizeof(json)-1, 0) <= 0 ||
+                 !strstr(json, "\"worker_done\":false") ||
+                 !strstr(json, "\"dispatch_pending\":true"))) abort();
+            ++dispatcher_release_checks;
+        }
+    }
     ++releases;
     item->object = item->control = NULL;
 }
@@ -129,6 +142,8 @@ static void run_dispatch_case(int cancel, int bad_output, int missing_scheduler)
     retained_dispatcher = (Shared){0};
     should_send = bad_manager = 0;
     require_context = 1;
+    observed_dispatcher = dispatcher_object;
+    dispatcher_release_checks = 0;
     payload[0] = 10; payload[1] = 0; payload[2] = 5; payload[3] = 0;
     memcpy(payload + 4, "filehelperHELLO", 15); payload_size = 19;
     *(void **)(dispatcher_object + 0x10) = missing_scheduler ? NULL : app_object;
@@ -161,6 +176,8 @@ static void run_dispatch_case(int cancel, int bad_output, int missing_scheduler)
             releases != (cancel ? 2 : 6)) abort();
     }
     require_context = 0;
+    if (!missing_scheduler && dispatcher_release_checks != 1) abort();
+    observed_dispatcher = NULL;
     if (!bad_output) unlink(path);
 }
 
