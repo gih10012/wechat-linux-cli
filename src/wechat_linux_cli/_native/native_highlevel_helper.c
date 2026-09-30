@@ -225,13 +225,17 @@ typedef struct {
     /* The final integer is rendered into the job label by 0x6243360.
      * Scheduling options are inherited separately from the scheduler. */
     void (*enqueue)(Shared *, void *, const SourceLocation *, TaskFunction *, int label_number);
+    uintptr_t scheduler_vtable;
+    uintptr_t coroutine_vtable;
 } DispatchApi;
 static DispatchApi dispatch_api;
 static Shared retained_dispatcher;
 static int enqueue_returned, task_invoked;
 
-/* Take the retained reference only after enqueue and every callback lifetime
- * have finished. Native destruction runs outside our lock. */
+/* Release our dispatcher reference after enqueue returns and callback ownership
+ * reaches zero. Native destruction runs outside our lock. The last destructor
+ * is still executing here: neither worker_done nor dispatch_pending authorizes
+ * unloading this helper, which must remain loaded until client exit. */
 static Shared finish_dispatch_locked(void) {
     Shared release = {0};
     if (enqueue_returned && !live_callbacks) {
@@ -306,6 +310,13 @@ static int enqueue_prepared(void) {
      * The scheduler's +8 subobject carries cancellation at +0xa1.
      */
     void *scheduler = *(void **)((unsigned char *)retained_dispatcher.object + 0x10);
+    void *coroutine = *(void **)retained_dispatcher.object;
+    if (!coroutine || *(uintptr_t *)scheduler != dispatch_api.scheduler_vtable ||
+        *(uintptr_t *)coroutine != dispatch_api.coroutine_vtable ||
+        *(void **)((unsigned char *)scheduler + 0xf0) != coroutine) {
+        api.shared_destroy(&retained_dispatcher);
+        failure = 13; worker_done = 1; report(); return EPROTO;
+    }
     if (*((unsigned char *)scheduler + 0xa9) & 1) {
         api.shared_destroy(&retained_dispatcher);
         failure = 12; worker_done = 1; report(); return ECANCELED;
@@ -348,7 +359,9 @@ int ncut_highlevel_enqueue(uintptr_t base, const void *data, size_t length,
     dispatch_api = (DispatchApi){
         .global_app = (void *)(base + 0x603c4e0),
         .dispatcher = (void *)(base + 0x603d470),
-        .enqueue = (void *)(base + 0x62426e0)
+        .enqueue = (void *)(base + 0x62426e0),
+        .scheduler_vtable = base + 0xaaaea98,
+        .coroutine_vtable = base + 0xaaacf80
     };
     return enqueue_prepared();
 }

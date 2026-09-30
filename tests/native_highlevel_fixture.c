@@ -95,7 +95,7 @@ static void run_case(int send, int mismatched_manager, int expected_failure,
 }
 
 static unsigned char dispatcher_object[32], job_object[16];
-static unsigned char scheduler_object[0xb0];
+static unsigned char scheduler_object[0x118], coroutine_object[16];
 static TaskCallback *queued;
 static TaskCallback inline_copy;
 static int enqueue_calls, synchronous;
@@ -148,12 +148,16 @@ static void run_dispatch_case(int cancel, int bad_output, int missing_scheduler)
     payload[0] = 10; payload[1] = 0; payload[2] = 5; payload[3] = 0;
     memcpy(payload + 4, "filehelperHELLO", 15); payload_size = 19;
     *(void **)(dispatcher_object + 0x10) = missing_scheduler == 1 ? NULL : scheduler_object;
+    *(void **)dispatcher_object = coroutine_object;
+    *(uintptr_t *)scheduler_object = missing_scheduler == 3 ? 0 : 0xaaaea98;
+    *(uintptr_t *)coroutine_object = missing_scheduler == 4 ? 0 : 0xaaacf80;
+    *(void **)(scheduler_object + 0xf0) = missing_scheduler == 5 ? NULL : coroutine_object;
     scheduler_object[0xa9] = missing_scheduler == 2 ? 1 : 0;
-    dispatch_api = (DispatchApi){fake_global_app, fake_dispatcher, fake_enqueue};
+    dispatch_api = (DispatchApi){fake_global_app, fake_dispatcher, fake_enqueue, 0xaaaea98, 0xaaacf80};
     int code = enqueue_prepared();
     if (missing_scheduler || bad_output) {
-        if (code != (missing_scheduler == 2 ? ECANCELED : missing_scheduler ? ENOTCONN : EIO) || enqueue_calls ||
-            failure != (missing_scheduler == 2 ? 12 : missing_scheduler ? 9 : 7) || !worker_done ||
+        if (code != (missing_scheduler >= 3 ? EPROTO : missing_scheduler == 2 ? ECANCELED : missing_scheduler ? ENOTCONN : EIO) || enqueue_calls ||
+            failure != (missing_scheduler >= 3 ? 13 : missing_scheduler == 2 ? 12 : missing_scheduler ? 9 : 7) || !worker_done ||
             live_callbacks || output_fd != -1 || releases != 1) abort();
     } else if (synchronous) {
         if (code || !worker_done || requests != 1 || sends || failure ||
@@ -196,6 +200,9 @@ int main(void) {
     run_dispatch_case(0, 1, 0);
     run_dispatch_case(0, 0, 1);
     run_dispatch_case(0, 0, 2);
+    run_dispatch_case(0, 0, 3);
+    run_dispatch_case(0, 0, 4);
+    run_dispatch_case(0, 0, 5);
     synchronous = 1;
     run_dispatch_case(0, 0, 0);
     puts("highlevel fixture passed");
