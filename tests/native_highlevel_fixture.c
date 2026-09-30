@@ -190,6 +190,14 @@ static void run_dispatch_case(int cancel, int bad_output, int missing_scheduler)
 }
 
 int main(void) {
+    Shared context = {0};
+    if (active_context_valid(NULL) || active_context_valid(&context)) abort();
+    context.object = app_object;
+    if (active_context_valid(&context)) abort();
+    context.object = NULL; context.control = app_object;
+    if (active_context_valid(&context)) abort();
+    context.object = app_object;
+    if (!active_context_valid(&context)) abort();
     context_available = fake_context_available;
     image_base = 0;
     api = (NativeApi){fake_app, fake_services, fake_manager, fake_request,

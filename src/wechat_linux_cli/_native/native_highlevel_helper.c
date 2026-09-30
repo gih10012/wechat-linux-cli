@@ -53,11 +53,18 @@ static size_t payload_size;
 
 /* The pinned manager getter dereferences FS-0x78 without a null check.
  * Read the active coroutine only; never fabricate or change client TLS. */
+static int active_context_valid(const Shared *context) {
+    return context && context->object && context->control;
+}
 static int native_context_available(void) {
     unsigned long fs_base = 0;
     if (syscall(SYS_arch_prctl, ARCH_GET_FS, &fs_base) || fs_base < 0x78)
         return 0;
-    return *(void **)(fs_base - 0x78) != NULL;
+    /* Match the client: it uses the thread self pointer read at FS:0,
+     * then a Shared holder at self-0x78, not a raw coroutine object. */
+    uintptr_t thread_self = *(uintptr_t *)fs_base;
+    if (thread_self < 0x78) return 0;
+    return active_context_valid(*(Shared **)(thread_self - 0x78));
 }
 static int (*context_available)(void) = native_context_available;
 
