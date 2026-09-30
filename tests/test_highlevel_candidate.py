@@ -105,7 +105,10 @@ class HighLevelCandidateTests(unittest.TestCase):
         self.assertEqual(int.from_bytes(payload[:2], 'little'), len(b'filehelper'))
         self.assertEqual(int.from_bytes(payload[2:4], 'little'), len('中文\n✅'.encode()))
         self.assertEqual(payload[4:], b'filehelper' + '中文\n✅'.encode())
-        for recipient, text in [('other', 'hello'), ('filehelper', ''),
+        self.assertIn(b'fixture-native@weclaw', native_highlevel_candidate.payload_for('fixture-native@weclaw', 'HELLO'))
+        for recipient in ('wxid_other_target', 'fixture@chatroom', 'filehelper', 'fixture@weclaw'):
+            self.assertIn(recipient.encode(), native_highlevel_candidate.payload_for(recipient, 'hello'))
+        for recipient, text in [('display name', 'hello'), ('../escape', 'hello'), ('filehelper', ''),
                                 ('filehelper', 'a' * 1025), ('filehelper', 'a\0b')]:
             with self.subTest(recipient=recipient, length=len(text)):
                 with self.assertRaises(ValueError):

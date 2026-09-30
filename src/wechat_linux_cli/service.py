@@ -265,12 +265,16 @@ class Service:
             return self.runner.capture_keys(request)
         if operation == 'send_status' and set(request) == {'operation', 'request_id'}:
             native.make_payload(0, 'validate identifier', request['request_id'])
+            try:
+                result = backend.inspect_trial(request['request_id'])
+                return {**result, 'ok': completed(result)}
+            except (OSError, ValueError):
+                pass
             state = getattr(self.runner, 'state', {})
             if (state.get('last_request_id') == request['request_id']
                     and state.get('last_result')):
                 return {'ok': True, 'read_only': True, **state['last_result']}
-            result = backend.inspect_trial(request['request_id'])
-            return {**result, 'ok': completed(result)}
+            return {**backend.inspect_trial(request['request_id']), 'ok': False}
         if operation != 'send_text' or set(request) != {'operation', 'text', 'request_id', 'recipient'}:
             raise ValueError('Unsupported operation or parameters')
         # Protocol validation occurs before starting any backend process.

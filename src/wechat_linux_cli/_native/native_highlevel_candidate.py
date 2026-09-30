@@ -23,9 +23,8 @@ LIVE_HIGHLEVEL_SEND_ENABLED = False
 
 
 def payload_for(recipient, text):
-    if (not isinstance(recipient, str) or not re.fullmatch(r'[A-Za-z0-9_.@-]{1,128}', recipient)
-            or recipient != 'filehelper'):
-        raise ValueError('Only the exact filehelper native chat ID is enabled for this trial')
+    if not isinstance(recipient, str) or not re.fullmatch(r'[A-Za-z0-9_.@-]{1,128}', recipient):
+        raise ValueError('Recipient must be an exact native chat ID: 1..128 ASCII letters/digits/_.@-')
     if not isinstance(text, str) or not text or '\0' in text:
         raise ValueError('Text must be nonempty and contain no NUL')
     recipient_bytes, text_bytes = recipient.encode(), text.encode()

@@ -122,12 +122,13 @@ def send_text(request):
     previous = replay(request)
     if previous is not None:
         return previous
-    # Only the accepted filehelper text scope can reach a new native call.
+    # Validate syntax here. Authorization belongs to the calling skill/owner,
+    # and is independent of the targets covered by runtime acceptance.
     highlevel.payload_for(request['recipient'], request['text'])
     pid, start = highlevel.client_identity()
     proof_id = preflight_id(request['request_id'])
     proof = highlevel.trial(False, 'HELLO', proof_id, expected_pid=pid,
-                           expected_start_time=start, allow_live=True)
+                           recipient=request['recipient'], expected_start_time=start, allow_live=True)
     if not proof.get('highlevel_preflight_verified'):
         return {**proof, 'ok': False, 'phase': 'preflight',
                 'preflight_request_id': proof_id, 'request_id': request['request_id'],

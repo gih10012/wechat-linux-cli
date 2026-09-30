@@ -126,11 +126,25 @@ class QueuedBackendTests(unittest.TestCase):
         self.assertIsNone(backend.history_evidence([row], [row], 'text')['local_history_integrated'])
         self.assertIsNone(backend.history_evidence([], [row, {**row, 'local_id': 2}], 'text')['local_history_integrated'])
 
-    def test_other_recipients_rejected_before_any_process_observation(self):
+    def test_malformed_recipient_rejected_before_any_process_observation(self):
         with patch.object(backend.highlevel, 'client_identity') as identity:
-            with self.assertRaisesRegex(ValueError, 'filehelper'):
-                backend.send_text({**self.request, 'recipient': 'some_friend'})
+            with self.assertRaisesRegex(ValueError, 'exact native chat ID'):
+                backend.send_text({**self.request, 'recipient': '../escape'})
         identity.assert_not_called()
+
+    def test_private_group_and_clawbot_targets_reach_both_preflight_and_send(self):
+        for recipient in ('wxid_fixture', 'fixture@chatroom', 'fixture@weclaw'):
+            with self.subTest(recipient=recipient), \
+                    patch.object(backend, 'replay', return_value=None), \
+                    patch.object(backend.highlevel, 'client_identity', return_value=(10, 99)), \
+                    patch.object(backend.highlevel, 'trial', side_effect=[
+                        {'highlevel_preflight_verified': True}, queued_result()]) as trial, \
+                    patch.object(backend, 'history_snapshot', return_value=None), \
+                    patch.object(backend.highlevel.base, 'save'):
+                result = backend.send_text({**self.request, 'recipient': recipient})
+                self.assertTrue(result['ok'])
+                self.assertEqual(trial.call_args_list[0].kwargs['recipient'], recipient)
+                self.assertEqual(trial.call_args_list[1].args[3], recipient)
 
     def test_cli_status_reads_queued_acceptance_when_service_is_unavailable(self):
         self.record(queued_result())

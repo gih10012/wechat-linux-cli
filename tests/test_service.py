@@ -70,6 +70,20 @@ class UnixServiceTests(unittest.TestCase):
         self.assertEqual(self.server.dispatch({'operation': 'capture_keys', 'account': 'me',
                                                'seconds': 1})['code'], 'SERVICE_STOPPING')
 
+    def test_send_status_returns_new_acceptance_instead_of_cached_initial_result(self):
+        request_id = 'fresh-acceptance'
+        self.server.runner = Mock()
+        self.server.runner.state = {'last_request_id': request_id,
+                                    'last_result': {'recipient_delivery_verified': False}}
+        current = {'recipient_delivery_verified': True, 'server_message_id': '42',
+                   'read_only': True}
+        with patch.object(service.backend, 'inspect_trial', return_value=current), \
+                patch.object(service, 'completed', return_value=True):
+            result = client.call({'operation': 'send_status', 'request_id': request_id}, self.path)
+        self.assertTrue(result['recipient_delivery_verified'])
+        self.assertEqual(result['server_message_id'], '42')
+        self.server.runner.assert_not_called()
+
 
 class ShutdownTests(unittest.TestCase):
     def test_stop_drains_pending_backend_and_keeps_status_socket_open(self):
