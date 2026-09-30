@@ -300,6 +300,14 @@ static int enqueue_prepared(void) {
         if (retained_dispatcher.control) api.shared_destroy(&retained_dispatcher);
         failure = 9; worker_done = 1; report(); return ENOTCONN;
     }
+    /* Mirrors the pinned native dispatcher's 6241c10 -> 9ae6590 check.
+     * The scheduler's +8 subobject carries cancellation at +0xa1.
+     */
+    void *scheduler = *(void **)((unsigned char *)retained_dispatcher.object + 0x10);
+    if (*((unsigned char *)scheduler + 0xa9) & 1) {
+        api.shared_destroy(&retained_dispatcher);
+        failure = 12; worker_done = 1; report(); return ECANCELED;
+    }
     TaskFunction function = {0};
     function.target = malloc(sizeof(*function.target));
     if (!function.target) {

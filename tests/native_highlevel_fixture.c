@@ -95,6 +95,7 @@ static void run_case(int send, int mismatched_manager, int expected_failure,
 }
 
 static unsigned char dispatcher_object[32], job_object[16];
+static unsigned char scheduler_object[0xb0];
 static TaskCallback *queued;
 static TaskCallback inline_copy;
 static int enqueue_calls, synchronous;
@@ -146,12 +147,13 @@ static void run_dispatch_case(int cancel, int bad_output, int missing_scheduler)
     dispatcher_release_checks = 0;
     payload[0] = 10; payload[1] = 0; payload[2] = 5; payload[3] = 0;
     memcpy(payload + 4, "filehelperHELLO", 15); payload_size = 19;
-    *(void **)(dispatcher_object + 0x10) = missing_scheduler ? NULL : app_object;
+    *(void **)(dispatcher_object + 0x10) = missing_scheduler == 1 ? NULL : scheduler_object;
+    scheduler_object[0xa9] = missing_scheduler == 2 ? 1 : 0;
     dispatch_api = (DispatchApi){fake_global_app, fake_dispatcher, fake_enqueue};
     int code = enqueue_prepared();
     if (missing_scheduler || bad_output) {
-        if (code != (missing_scheduler ? ENOTCONN : EIO) || enqueue_calls ||
-            failure != (missing_scheduler ? 9 : 7) || !worker_done ||
+        if (code != (missing_scheduler == 2 ? ECANCELED : missing_scheduler ? ENOTCONN : EIO) || enqueue_calls ||
+            failure != (missing_scheduler == 2 ? 12 : missing_scheduler ? 9 : 7) || !worker_done ||
             live_callbacks || output_fd != -1 || releases != 1) abort();
     } else if (synchronous) {
         if (code || !worker_done || requests != 1 || sends || failure ||
@@ -193,6 +195,7 @@ int main(void) {
     run_dispatch_case(1, 0, 0);
     run_dispatch_case(0, 1, 0);
     run_dispatch_case(0, 0, 1);
+    run_dispatch_case(0, 0, 2);
     synchronous = 1;
     run_dispatch_case(0, 0, 0);
     puts("highlevel fixture passed");
