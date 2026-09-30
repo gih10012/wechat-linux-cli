@@ -15,6 +15,7 @@ from . import native_send_candidate as base
 from .native_send_probe import desktop_identity, run_desktop_preparation
 
 LIVE_HIGHLEVEL_PREFLIGHT_ENABLED = False
+LIVE_HIGHLEVEL_SEND_ENABLED = False
 
 
 def payload_for(recipient, text):
@@ -36,10 +37,28 @@ def runtime_root(home):
              Path(home)/'.local/state/wechat-linux-cli')/'native-highlevel')
 
 
+def require_preflight(root, request_id, pid, start_time):
+    if not isinstance(request_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{3,79}', request_id):
+        raise ValueError('VERIFIED_PREFLIGHT_REQUIRED: a preflight request ID is required')
+    work = root/('preflight-' + hashlib.sha256(request_id.encode()).hexdigest()[:24])
+    result = json.loads((work/'result.json').read_text())
+    config = json.loads((work/'config.json').read_text())
+    worker = result.get('worker', {})
+    if not (result.get('request_id') == request_id and result.get('highlevel_preflight_verified')
+            and result.get('detached') and result.get('queued_dispatch_call')
+            and config.get('pid') == pid and str(config.get('start_time')) == str(start_time)
+            and config.get('send') is False and config.get('launch_symbol') == 'ncut_highlevel_enqueue'
+            and worker.get('worker_done') and worker.get('manager_verified')
+            and worker.get('request_constructed') and not worker.get('failure')
+            and not worker.get('submission_entered') and not worker.get('live_callbacks')
+            and not worker.get('dispatch_pending')):
+        raise ValueError('VERIFIED_PREFLIGHT_REQUIRED: queued construction proof does not match this client')
+
+
 def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
-          expected_pid=None, expected_start_time=None):
-    if send:
-        raise ValueError('HIGHLEVEL_SEND_NOT_READY: event-thread call path is not verified')
+          expected_pid=None, expected_start_time=None, preflight_request_id=None):
+    if send and not LIVE_HIGHLEVEL_SEND_ENABLED:
+        raise ValueError('HIGHLEVEL_SEND_NOT_READY: live queued send acceptance is not enabled')
     if not all(isinstance(value, int) and value > 0
                for value in (expected_pid, expected_start_time)):
         raise ValueError('Observed client PID and start time are required')
@@ -49,6 +68,8 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
     uid = int(os.environ.get('SUDO_UID', '0')) if os.geteuid() == 0 else os.getuid()
     owner = pwd.getpwuid(uid)
     work_root = runtime_root(owner.pw_dir)
+    if send:
+        require_preflight(work_root, preflight_request_id, expected_pid, expected_start_time)
     work_name = ('send-' if send else 'preflight-') + hashlib.sha256(request_id.encode()).hexdigest()[:24]
     work = work_root/work_name
     fingerprint = hashlib.sha256(payload).hexdigest()
@@ -97,13 +118,14 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
         stage = 'compile_helper'
         helper = base.compile_helper(work, uid, owner.pw_gid,
                                      source=Path(__file__).with_name('native_highlevel_helper.c'),
-                                     highlevel_dispatch=True)
+                                     highlevel_dispatch=True, highlevel_send=send)
         config = {**prepared, 'pid': pid, 'start_time': start, 'uid': uid, 'gid': owner.pw_gid,
                   'binary_copy': str(work/'wechat.elf'), 'helper': str(helper),
                   'injection_result': str(work/'injection.json'),
                   'worker_result': str(work/'worker.json'), 'payload_hex': payload.hex(),
-                  'send': False, 'launch_symbol': 'ncut_highlevel_enqueue',
-                  'sync_call': False, 'dispatch_call': True}
+                  'send': send, 'launch_symbol': 'ncut_highlevel_enqueue',
+                  'sync_call': False, 'dispatch_call': True, 'highlevel_send_trial': send,
+                  'preflight_request_id': preflight_request_id}
         stage = 'run_injection'
         result = base.run_injection(config, work)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
@@ -163,11 +185,13 @@ def main(argv=None):
     parser.add_argument('--event-tid', type=int, help='Legacy option; queued preflight does not select this thread')
     parser.add_argument('--expected-pid', type=int, required=True)
     parser.add_argument('--expected-start-time', type=int, required=True)
+    parser.add_argument('--preflight-request-id')
     args = parser.parse_args(argv)
     try:
         result = trial(args.operation == 'send', args.text, args.request_id, args.recipient,
                        event_tid=args.event_tid, expected_pid=args.expected_pid,
-                       expected_start_time=args.expected_start_time)
+                       expected_start_time=args.expected_start_time,
+                       preflight_request_id=args.preflight_request_id)
         print(json.dumps(result, ensure_ascii=False))
         return 0
     except (OSError, ValueError) as error:

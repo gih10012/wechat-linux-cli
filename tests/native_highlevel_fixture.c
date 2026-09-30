@@ -100,7 +100,7 @@ static unsigned char dispatcher_object[32], job_object[16];
 static unsigned char scheduler_object[0x118], coroutine_object[16];
 static TaskCallback *queued;
 static TaskCallback inline_copy;
-static int enqueue_calls, synchronous;
+static int enqueue_calls, synchronous, dispatch_send;
 static void *fake_global_app(void) { return app_object; }
 static void fake_dispatcher(Shared *out, void *app) {
     if (app != app_object) abort();
@@ -143,7 +143,7 @@ static void run_dispatch_case(int cancel, int bad_output, int missing_scheduler)
     submission_entered = result_returned = result_success = 0;
     live_callbacks = dispatch_pending = enqueue_returned = task_invoked = report_failed = 0;
     retained_dispatcher = (Shared){0};
-    should_send = bad_manager = 0;
+    should_send = dispatch_send; bad_manager = 0;
     require_context = 1;
     observed_dispatcher = dispatcher_object;
     dispatcher_release_checks = 0;
@@ -162,7 +162,7 @@ static void run_dispatch_case(int cancel, int bad_output, int missing_scheduler)
             failure != (missing_scheduler >= 3 ? 13 : missing_scheduler == 2 ? 12 : missing_scheduler ? 9 : 7) || !worker_done ||
             live_callbacks || output_fd != -1 || releases != 1) abort();
     } else if (synchronous) {
-        if (code || !worker_done || requests != 1 || sends || failure ||
+        if (code || !worker_done || requests != 1 || sends != dispatch_send || failure ||
             live_callbacks || dispatch_pending || output_fd != -1 || releases != 6)
             abort();
     } else {
@@ -173,7 +173,7 @@ static void run_dispatch_case(int cancel, int bad_output, int missing_scheduler)
             pthread_t thread;
             if (pthread_create(&thread, NULL, run_queued, NULL) ||
                 pthread_join(thread, NULL)) abort();
-            if (!worker_done || requests != 1 || sends || failure) abort();
+            if (!worker_done || requests != 1 || sends != dispatch_send || failure) abort();
         }
         /* A remaining inline clone must retain the dispatcher and report fd. */
         if (live_callbacks != 1 || output_fd < 0 || !retained_dispatcher.control)
@@ -220,6 +220,9 @@ int main(void) {
     run_dispatch_case(0, 0, 3);
     run_dispatch_case(0, 0, 4);
     run_dispatch_case(0, 0, 5);
+    dispatch_send = 1;
+    run_dispatch_case(0, 0, 0);
+    dispatch_send = 0;
     synchronous = 1;
     run_dispatch_case(0, 0, 0);
     puts("highlevel fixture passed");

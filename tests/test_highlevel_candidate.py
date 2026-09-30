@@ -36,6 +36,30 @@ class HighLevelCandidateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'pinned high-level helper'):
                 base.compile_helper(Path(temp), highlevel_dispatch=True)
 
+    def test_send_requires_completed_queued_preflight_for_same_client(self):
+        request_id = 'test-queued-proof-01'
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            work = root/('preflight-' + hashlib.sha256(request_id.encode()).hexdigest()[:24])
+            work.mkdir()
+            result = {'request_id': request_id, 'highlevel_preflight_verified': True,
+                      'detached': True, 'queued_dispatch_call': True,
+                      'worker': {'worker_done': True, 'manager_verified': True,
+                                 'request_constructed': True, 'failure': 0,
+                                 'submission_entered': False, 'live_callbacks': 0,
+                                 'dispatch_pending': False}}
+            (work/'result.json').write_text(json.dumps(result))
+            (work/'config.json').write_text(json.dumps({'pid': 10, 'start_time': '99',
+                'send': False, 'launch_symbol': 'ncut_highlevel_enqueue'}))
+            native_highlevel_candidate.require_preflight(root, request_id, 10, 99)
+            for pid, start in [(11, 99), (10, 100)]:
+                with self.assertRaisesRegex(ValueError, 'VERIFIED_PREFLIGHT_REQUIRED'):
+                    native_highlevel_candidate.require_preflight(root, request_id, pid, start)
+            result['worker']['submission_entered'] = True
+            (work/'result.json').write_text(json.dumps(result))
+            with self.assertRaisesRegex(ValueError, 'VERIFIED_PREFLIGHT_REQUIRED'):
+                native_highlevel_candidate.require_preflight(root, request_id, 10, 99)
+
     def test_production_helper_rejects_preflight_and_send_before_target_access(self):
         with tempfile.TemporaryDirectory() as temp:
             library = Path(temp)/'helper.so'

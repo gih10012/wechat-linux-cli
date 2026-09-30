@@ -112,12 +112,17 @@ def save(path, value):
     temp.replace(path)
 
 
-def compile_helper(work, uid=None, gid=None, source=None, *, highlevel_dispatch=False):
+def compile_helper(work, uid=None, gid=None, source=None, *, highlevel_dispatch=False,
+                   highlevel_send=False):
     output = work/'helper.so'
     source = HERE/'native_send_helper.c' if source is None else Path(source)
     if highlevel_dispatch and source.resolve() != (HERE/'native_highlevel_helper.c').resolve():
         raise ValueError('Dispatch compilation requires the pinned high-level helper')
     definitions = ['-DNCUT_ALLOW_HIGHLEVEL_DISPATCH=1'] if highlevel_dispatch else []
+    if highlevel_send:
+        if not highlevel_dispatch:
+            raise ValueError('High-level send compilation requires queued dispatch')
+        definitions.append('-DNCUT_ALLOW_HIGHLEVEL_SEND=1')
     identity = {'user': uid, 'group': gid, 'extra_groups': []} if uid is not None and os.geteuid() == 0 else {}
     subprocess.run(['/usr/bin/gcc', '-shared', '-fPIC', '-O2', '-std=c11', '-Wall',
                     '-Wextra', '-Werror', '-pthread', *definitions, str(source),
@@ -267,7 +272,7 @@ def inject_in_gdb(gdb):
             raise ValueError('Synchronous call and launcher must be paired')
         if bool(cfg.get('dispatch_call')) != (launch_symbol == 'ncut_highlevel_enqueue'):
             raise ValueError('Queued dispatch and launcher must be paired')
-        if cfg.get('dispatch_call') and cfg['send']:
+        if cfg.get('dispatch_call') and cfg['send'] and not cfg.get('highlevel_send_trial'):
             raise ValueError('Queued high-level send is disabled')
         symbol = launch_symbol.encode('ascii') + b'\0'
         total = helper + result + symbol + data

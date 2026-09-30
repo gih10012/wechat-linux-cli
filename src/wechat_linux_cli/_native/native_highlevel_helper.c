@@ -377,8 +377,8 @@ static int enqueue_prepared(void) {
 __attribute__((visibility("default")))
 int ncut_highlevel_enqueue(uintptr_t base, const void *data, size_t length,
                            const char *result_path, int send) {
-    if (!NCUT_ALLOW_HIGHLEVEL_DISPATCH || send) return ENOSYS;
-    int code = initialize(base, data, length, result_path, 0);
+    if (!NCUT_ALLOW_HIGHLEVEL_DISPATCH || (send && !NCUT_ALLOW_HIGHLEVEL_SEND)) return ENOSYS;
+    int code = initialize(base, data, length, result_path, send);
     if (code) return code;
     dispatch_api = (DispatchApi){
         .global_app = (void *)(base + 0x603c4e0),
