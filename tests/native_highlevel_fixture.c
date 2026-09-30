@@ -105,8 +105,8 @@ static void fake_dispatcher(Shared *out, void *app) {
     *out = (Shared){dispatcher_object, dispatcher_object};
 }
 static void fake_enqueue(Shared *out, void *dispatcher, const SourceLocation *source,
-                         TaskFunction *function, int flags) {
-    if (dispatcher != dispatcher_object || flags != 1 || !source->file ||
+                         TaskFunction *function, int label_number) {
+    if (dispatcher != dispatcher_object || label_number != 1 || !source->file ||
         !source->function || source->line != 1) abort();
     ++enqueue_calls;
     if (synchronous) {

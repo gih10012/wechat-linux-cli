@@ -222,7 +222,9 @@ _Static_assert(__builtin_offsetof(SourceLocation, caller) == 24, "caller PC offs
 typedef struct {
     void *(*global_app)(void);
     void (*dispatcher)(Shared *, void *);
-    void (*enqueue)(Shared *, void *, const SourceLocation *, TaskFunction *, int);
+    /* The final integer is rendered into the job label by 0x6243360.
+     * Scheduling options are inherited separately from the scheduler. */
+    void (*enqueue)(Shared *, void *, const SourceLocation *, TaskFunction *, int label_number);
 } DispatchApi;
 static DispatchApi dispatch_api;
 static Shared retained_dispatcher;
