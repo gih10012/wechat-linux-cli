@@ -355,7 +355,7 @@ def inject_in_gdb(gdb):
 def process_running_untraced(pid, start_time=None):
     target = Path('/proc')/str(pid)
     try:
-        if start_time and target.joinpath('stat').read_text().rsplit(')', 1)[1].split()[19] != start_time:
+        if start_time and target.joinpath('stat').read_text().rsplit(')', 1)[1].split()[19] != str(start_time):
             return False
         rows = dict(line.split(':', 1) for line in target.joinpath('status').read_text().splitlines())
         return int(rows['TracerPid']) == 0 and rows['State'].split()[0] not in ('T', 't', 'Z')

@@ -156,6 +156,22 @@ class HighLevelCandidateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'HIGHLEVEL_SEND_NOT_READY'):
                 native_highlevel_candidate.trial(True, 'HELLO', request_id, **proof)
 
+    def test_saved_send_replay_needs_no_live_guard_privilege_preflight_or_process_identity(self):
+        request_id = 'saved-send-replay'
+        payload = native_highlevel_candidate.payload_for('filehelper', 'HELLO')
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+                os.environ, {'WECHAT_LINUX_RUNTIME_DIR': temp}), patch.object(
+                native_highlevel_candidate, 'client_identity') as identity:
+            work = native_highlevel_candidate.work_for(request_id)
+            work.mkdir(parents=True)
+            (work/'request.json').write_text(json.dumps({
+                'payload_sha256': hashlib.sha256(payload).hexdigest(), 'send': True}))
+            (work/'result.json').write_text(json.dumps({'status': 'trial_finished'}))
+            self.assertTrue(native_highlevel_candidate.trial(True, 'HELLO', request_id)['replayed'])
+            identity.assert_not_called()
+            with self.assertRaisesRegex(ValueError, 'REQUEST_ID_CONFLICT'):
+                native_highlevel_candidate.trial(True, 'CHANGED', request_id)
+
 
 if __name__ == '__main__':
     unittest.main()

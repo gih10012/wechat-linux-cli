@@ -36,8 +36,8 @@ def parser():
     capture = operations.add_parser('capture-keys', help='Read keys once from the owner\'s running client through the service')
     capture.add_argument('--account', default='me')
     capture.add_argument('--seconds', type=int, default=15)
-    send = operations.add_parser('send-text', help='Send via the local service; local outgoing history integration is pending')
-    send.add_argument('--recipient', required=True, help='Exact native chat ID; use conversations to resolve the intended target')
+    send = operations.add_parser('send-text', help='Send filehelper text through the client message-creation pipeline')
+    send.add_argument('--recipient', required=True, help='Exact native chat ID; new sends currently support filehelper only')
     send.add_argument('--text', required=True)
     send.add_argument('--request-id', required=True, help='Unique ID for this operation; reuse it for the same operation only')
     status_send = operations.add_parser('send-status', help='Read the recorded outcome of a prior send')
@@ -59,7 +59,8 @@ def run(argv=None):
     if args.operation == 'send-status':
         from pathlib import Path
         from . import service
-        from ._native.native_send_candidate import inspect_trial, make_payload
+        from .backend import inspect_trial, completed
+        from ._native.native_send_candidate import make_payload
         make_payload(0, 'validate identifier', args.request_id)
         try:
             return client.call({'operation': 'send_status', 'request_id': args.request_id})
@@ -72,7 +73,8 @@ def run(argv=None):
                 if (state.get('last_request_id') == args.request_id
                         and isinstance(state.get('last_result'), dict)):
                     return {'read_only': True, **state['last_result']}
-            return {'ok': True, 'read_only': True, **inspect_trial(args.request_id)}
+            result = inspect_trial(args.request_id)
+            return {**result, 'ok': completed(result), 'read_only': True}
     native_args = [args.operation, '--account', args.account]
     if args.operation == 'conversations':
         native_args += ['--query', args.query, '--limit', str(args.limit)]

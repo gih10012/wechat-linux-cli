@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Pinned-client high-level message construction trial; not a supported CLI route yet."""
+"""Pinned-client queued message construction and submission.
+
+Direct experimental calls remain disabled; the service enables the reviewed
+queued route explicitly. The synchronous C entry stays compile-disabled.
+"""
 import argparse
 import hashlib
 import json
@@ -37,6 +41,60 @@ def runtime_root(home):
              Path(home)/'.local/state/wechat-linux-cli')/'native-highlevel')
 
 
+def work_for(request_id, send=True):
+    if not isinstance(request_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{3,79}', request_id):
+        raise ValueError('request-id must be 4..80 ASCII letters/digits/dot/underscore/hyphen')
+    uid = int(os.environ.get('SUDO_UID', '0')) if os.geteuid() == 0 else os.getuid()
+    return runtime_root(pwd.getpwuid(uid).pw_dir)/(
+        ('send-' if send else 'preflight-') + hashlib.sha256(request_id.encode()).hexdigest()[:24])
+
+
+def inspect_trial(request_id, send=True):
+    """Read reports and independent acceptance without touching the client."""
+    work = work_for(request_id, send)
+    result = json.loads((work/'result.json').read_text())
+    if (work/'worker.json').exists():
+        result['worker'] = json.loads((work/'worker.json').read_text())
+    if (work/'acceptance.json').exists():
+        proof = json.loads((work/'acceptance.json').read_text())
+        if proof.get('request_id') == request_id:
+            for key in ('local_history_integrated', 'local_history_exact_matches',
+                        'local_message_id', 'server_message_id', 'recipient_delivery_verified',
+                        'linux_ui_verified', 'replay_verified'):
+                if key in proof:
+                    result[key] = proof[key]
+    worker = result.get('worker', {})
+    if (result.get('status') in ('worker_pending', 'callback_pending')
+            and worker.get('worker_done') and worker.get('live_callbacks') == 0
+            and worker.get('dispatch_pending') is False):
+        result['status'] = 'trial_finished'
+    if send:
+        result['native_submission_entered'] = bool(worker.get('submission_entered'))
+        result['local_insert_result_success'] = (
+            bool(worker.get('result_success')) if worker.get('result_returned') else None)
+    return {'result_path': str(work/'result.json'), 'read_only': True, **result}
+
+
+def client_identity():
+    uid = int(os.environ.get('SUDO_UID', '0')) if os.geteuid() == 0 else os.getuid()
+    targets = []
+    for target in Path('/proc').iterdir():
+        if not target.name.isdigit():
+            continue
+        try:
+            if target.stat().st_uid == uid and Path(os.readlink(target/'exe')).name == 'wechat':
+                targets.append(target)
+        except OSError:
+            pass
+    if len(targets) != 1:
+        raise ValueError('Exactly one desktop WeChat process is required')
+    target = targets[0]
+    start = int((target/'stat').read_text().rsplit(')', 1)[1].split()[19])
+    if not base.process_running_untraced(int(target.name), start):
+        raise ValueError('Client is already traced, stopped or exiting')
+    return int(target.name), start
+
+
 def require_preflight(root, request_id, pid, start_time):
     if not isinstance(request_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{3,79}', request_id):
         raise ValueError('VERIFIED_PREFLIGHT_REQUIRED: a preflight request ID is required')
@@ -56,52 +114,36 @@ def require_preflight(root, request_id, pid, start_time):
 
 
 def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
-          expected_pid=None, expected_start_time=None, preflight_request_id=None):
-    if send and not LIVE_HIGHLEVEL_SEND_ENABLED:
-        raise ValueError('HIGHLEVEL_SEND_NOT_READY: live queued send acceptance is not enabled')
-    if not all(isinstance(value, int) and value > 0
-               for value in (expected_pid, expected_start_time)):
-        raise ValueError('Observed client PID and start time are required')
+          expected_pid=None, expected_start_time=None, preflight_request_id=None,
+          allow_live=False):
     payload = payload_for(recipient, text)
-    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{3,79}', request_id):
-        raise ValueError('request-id must be 4..80 ASCII letters/digits/dot/underscore/hyphen')
+    work = work_for(request_id, send)
     uid = int(os.environ.get('SUDO_UID', '0')) if os.geteuid() == 0 else os.getuid()
     owner = pwd.getpwuid(uid)
     work_root = runtime_root(owner.pw_dir)
-    if send:
-        require_preflight(work_root, preflight_request_id, expected_pid, expected_start_time)
-    work_name = ('send-' if send else 'preflight-') + hashlib.sha256(request_id.encode()).hexdigest()[:24]
-    work = work_root/work_name
     fingerprint = hashlib.sha256(payload).hexdigest()
     if work.exists():
         previous = json.loads((work/'request.json').read_text())
         if previous.get('payload_sha256') != fingerprint or previous.get('send') != send:
             raise ValueError('REQUEST_ID_CONFLICT: same ID has different content or operation')
         if (work/'result.json').exists():
-            return {'result_path': str(work/'result.json'), 'replayed': True,
-                    **json.loads((work/'result.json').read_text())}
+            return {**inspect_trial(request_id, send), 'replayed': True}
         raise ValueError('REQUEST_PENDING: inspect the existing request before retrying')
-    if not LIVE_HIGHLEVEL_PREFLIGHT_ENABLED:
+    if send and not (LIVE_HIGHLEVEL_SEND_ENABLED or allow_live):
+        raise ValueError('HIGHLEVEL_SEND_NOT_READY: live queued send acceptance is not enabled')
+    if not (LIVE_HIGHLEVEL_PREFLIGHT_ENABLED or allow_live):
         raise ValueError(
-            'HIGHLEVEL_PREFLIGHT_DISABLED: the live trial crashed while resolving '
-            'the active coroutine context; saved results remain readable')
+            'HIGHLEVEL_PREFLIGHT_DISABLED: direct trials are disabled; use the installed service')
+    if not all(type(value) is int and value > 0
+               for value in (expected_pid, expected_start_time)):
+        raise ValueError('Observed client PID and start time are required')
+    if send:
+        require_preflight(work_root, preflight_request_id, expected_pid, expected_start_time)
     if uid == 0 or (os.geteuid() != 0 and not base.has_ptrace_capability()):
         raise ValueError('PRIVILEGE_REQUIRED: owner-scoped ptrace capability is required')
-    targets = []
-    for target in Path('/proc').iterdir():
-        if not target.name.isdigit():
-            continue
-        try:
-            if target.stat().st_uid == uid and Path(os.readlink(target/'exe')).name == 'wechat':
-                targets.append(target)
-        except OSError:
-            pass
-    if len(targets) != 1:
-        raise ValueError('Exactly one desktop WeChat process is required')
-    target = targets[0]
-    pid = int(target.name)
-    start = (target/'stat').read_text().rsplit(')', 1)[1].split()[19]
-    if pid != expected_pid or start != str(expected_start_time):
+    pid, start = client_identity()
+    target = Path('/proc', str(pid))
+    if pid != expected_pid or start != expected_start_time:
         raise ValueError('Client process identity changed since the read-only observation')
     if not base.process_running_untraced(pid, start):
         raise ValueError('Client is already traced, stopped or exiting')

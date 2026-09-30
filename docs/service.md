@@ -2,7 +2,7 @@
 
 辅助服务把需要 `CAP_SYS_PTRACE` 的客户端操作集中到本机 Unix socket。安装时使用一次 sudo，日常通过普通用户的 `wechat-linux` 命令调用。它是 systemd **系统服务**，以桌面用户的 UID/GID 运行；不是 root 常驻服务，也不是 `systemctl --user` 服务。
 
-当前安装器通过离线测试，systemd unit 已用本机解释器替代尚未安装的路径完成语法校验；独立安装包已从仓库外实际读取账号，无特权临时服务的健康检查、权限拒绝和退出清理通过。本文的特权部署命令尚未在真实桌面完成安装验收，发送后的客户端本地消息显示仍在修复。
+当前安装器通过离线测试，systemd unit 已用本机解释器替代尚未安装的路径完成语法校验；独立安装包已从仓库外实际读取账号，无特权临时服务的健康检查、权限拒绝和退出清理通过。2026-09-30 排队原生发送已通过手机单次收件、本地数据库读回及 Linux 窗口显示验收；本文的特权部署命令和部署后普通 CLI 发送尚未验收。
 
 ## 环境与资源
 
@@ -45,9 +45,13 @@ sudo /usr/bin/python3 -I "$PWD/src/wechat_linux_cli/install.py" \
 ```bash
 wechat-linux service-status
 wechat-linux inspect-pending
+wechat-linux send-text --recipient filehelper --text '消息文字' --request-id '本次唯一ID'
+wechat-linux send-status --request-id '原ID'
 systemctl status "wechat-linux-cli@$(id -u).service"
 journalctl -u "wechat-linux-cli@$(id -u).service" -n 50 --no-pager
 ```
+
+新发送只支持已验收的 filehelper 文字。服务串行执行一次不发送的客户端排队构造预检，再用同一 PID/启动时间调用客户端真实消息创建入口；不能使用旧同步入口。相同 ID/正文/目标只返回已有结果，旧低层请求仍保留防重。`ok` 表示客户端提交调用成功，`local_history_integrated` 根据发送前后的独立本地快照记录；读取密钥缺失或读回不明确时为 null，不据此重发。手机投递、客户端 UI 显示不是 API 成功值或数据库记录的推论。请先检查原请求及接收端，未知结果没有自动重试。
 
 首次读取缺少密钥时，服务提供 `wechat-linux capture-keys --account me --seconds 15`。该命令通过受限服务只读扫描当前用户的微信进程内存，验证候选密钥后写入私有文件，响应不输出密钥；扫描时间可设为 1–45 秒。接口已通过离线测试，尚未完成部署后的真实采集验收。已有密钥时可继续直接读取本地数据库。
 
@@ -71,6 +75,7 @@ sudo systemctl disable "wechat-linux-cli@$(id -u).service"
 | `/run/wechat-linux-cli-<UID>/` | 桌面用户，`0700`；控制 socket 和进程锁，保留至重启或明确清理 |
 | `~/.local/state/wechat-linux-cli/service/` | 桌面用户；未完成任务记录及后端结果 |
 | `~/.local/state/wechat-linux-cli/native-send/` | 桌面用户；原生任务状态、调试日志和任务构建产物 |
+| `~/.local/state/wechat-linux-cli/native-highlevel/` | 桌面用户；排队构造预检、文字提交及独立本地读回证据 |
 | `~/.local/state/wechat-personal/native-keys/` | 桌面用户；现有本地读取密钥，文件须为 `0600` |
 
 已有 `~/.local/state/ncut-wechat-skills/native-send-trial/` 时，原生任务继续使用该位置，以保留既有 request ID 和重试判断。状态、结果及调试文件可能包含账号信息或消息内容，不进入仓库。服务重装或升级前应保留这些私有状态；当前安装器没有自动升级、卸载或迁移入口。
