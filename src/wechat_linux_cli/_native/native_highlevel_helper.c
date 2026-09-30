@@ -17,6 +17,9 @@
 #ifndef NCUT_ALLOW_HIGHLEVEL_SEND
 #define NCUT_ALLOW_HIGHLEVEL_SEND 0
 #endif
+#ifndef NCUT_ALLOW_HIGHLEVEL_PREFLIGHT
+#define NCUT_ALLOW_HIGHLEVEL_PREFLIGHT 0
+#endif
 
 typedef struct { void *object; void *control; } Shared;
 typedef struct {
@@ -164,6 +167,11 @@ static int initialize(uintptr_t base, const void *data, size_t length,
 __attribute__((visibility("default")))
 int ncut_highlevel_sync(uintptr_t base, const void *data, size_t length,
                         const char *result_path, int send) {
+    /* An idle OS thread has no guaranteed active client coroutine context.
+     * Keep this synchronous route unavailable in production, independently
+     * of the Python entrypoint, until a client scheduling route is verified.
+     */
+    if (!NCUT_ALLOW_HIGHLEVEL_PREFLIGHT) return ENOSYS;
     int code = initialize(base, data, length, result_path, send);
     if (code) return code;
     perform_native();

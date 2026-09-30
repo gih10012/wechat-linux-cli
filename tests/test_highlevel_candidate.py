@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class HighLevelCandidateTests(unittest.TestCase):
-    def test_production_helper_rejects_send_before_target_access(self):
+    def test_production_helper_rejects_preflight_and_send_before_target_access(self):
         with tempfile.TemporaryDirectory() as temp:
             library = Path(temp)/'helper.so'
             compiler = subprocess.run(
@@ -30,8 +30,10 @@ class HighLevelCandidateTests(unittest.TestCase):
                              ctypes.c_char_p, ctypes.c_int)
             call.restype = ctypes.c_int
             report = Path(temp)/'unexpected-report.json'
-            self.assertEqual(call(1, b'\x01\x00\x01\x00ab', 6,
-                                  str(report).encode(), 1), errno.ENOSYS)
+            for send in (0, 1):
+                with self.subTest(send=send):
+                    self.assertEqual(call(1, b'\x01\x00\x01\x00ab', 6,
+                                          str(report).encode(), send), errno.ENOSYS)
             self.assertFalse(report.exists())
 
     def test_payload_is_bounded_exact_native_id_and_utf8(self):
