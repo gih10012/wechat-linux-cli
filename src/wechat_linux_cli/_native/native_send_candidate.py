@@ -257,10 +257,15 @@ def inject_in_gdb(gdb):
         result = os.fsencode(cfg['worker_result']) + b'\0'
         launch_symbol = cfg.get('launch_symbol',
                                 'ncut_test_launch' if cfg.get('fixture') else 'ncut_launch')
-        if launch_symbol not in ('ncut_launch', 'ncut_test_launch', 'ncut_highlevel_sync'):
+        if launch_symbol not in ('ncut_launch', 'ncut_test_launch', 'ncut_highlevel_sync',
+                                 'ncut_highlevel_enqueue'):
             raise ValueError('Unsupported launch symbol')
         if bool(cfg.get('sync_call')) != (launch_symbol == 'ncut_highlevel_sync'):
             raise ValueError('Synchronous call and launcher must be paired')
+        if bool(cfg.get('dispatch_call')) != (launch_symbol == 'ncut_highlevel_enqueue'):
+            raise ValueError('Queued dispatch and launcher must be paired')
+        if cfg.get('dispatch_call') and cfg['send']:
+            raise ValueError('Queued high-level send is disabled')
         symbol = launch_symbol.encode('ascii') + b'\0'
         total = helper + result + symbol + data
         # Only loader/allocation/thread launch calls occur under the debugger.
@@ -387,6 +392,9 @@ def run_injection(cfg, work):
     if cfg.get('sync_call'):
         result['armed'] = False
         result['direct_event_thread_call'] = True
+    elif cfg.get('dispatch_call'):
+        result['armed'] = False
+        result['queued_dispatch_call'] = True
     else:
         arm = Path(cfg['worker_result'] + '.arm')
         arm.touch(mode=0o600, exist_ok=False)

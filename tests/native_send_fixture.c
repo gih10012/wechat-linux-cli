@@ -103,6 +103,19 @@ int ncut_test_launch(uintptr_t base, const void *data, size_t length, const char
     return code;
 }
 #ifdef NCUT_FIXTURE_DSO
+/* Transport fixture only: callback scheduling is covered in highlevel_fixture. */
+__attribute__((visibility("default")))
+int ncut_highlevel_enqueue(uintptr_t base, const void *data, size_t length,
+                           const char *result, int send) {
+    (void)base; (void)data; (void)length;
+    if (send) return ENOSYS;
+    if (started++) return EALREADY;
+    output_fd = open(result, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (output_fd < 0) return errno;
+    parsed = worker_done = 1;
+    report_locked();
+    return 0;
+}
 __attribute__((visibility("default")))
 int ncut_highlevel_sync(uintptr_t base, const void *data, size_t length,
                         const char *result, int send) {

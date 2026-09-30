@@ -123,6 +123,10 @@ class NativeCandidateTests(unittest.TestCase):
         self.run_debugger_fixture(False, launch_symbol='ncut_highlevel_sync', sync=True)
 
     @unittest.skipUnless(shutil.which('gdb'), 'GDB is required for real debugger fixture')
+    def test_queued_preflight_detaches_without_worker_arm_file(self):
+        self.run_debugger_fixture(False, launch_symbol='ncut_highlevel_enqueue', dispatch=True)
+
+    @unittest.skipUnless(shutil.which('gdb'), 'GDB is required for real debugger fixture')
     def test_real_poll_syscall_is_recognized_without_function_name(self):
         self.run_debugger_fixture(False, poll=True)
 
@@ -130,7 +134,8 @@ class NativeCandidateTests(unittest.TestCase):
     def test_other_thread_signal_during_loader_never_arms_send(self):
         self.run_debugger_fixture(True)
 
-    def run_debugger_fixture(self, interrupt, poll=False, launch_symbol=None, sync=False):
+    def run_debugger_fixture(self, interrupt, poll=False, launch_symbol=None, sync=False,
+                             dispatch=False):
         if os.geteuid() == 0:
             self.skipTest('Run this synthetic debugger test as ordinary user')
         with tempfile.TemporaryDirectory() as tmp:
@@ -151,6 +156,8 @@ class NativeCandidateTests(unittest.TestCase):
                             'event_tid': 'fixture_futex'})
             if launch_symbol:
                 cfg['launch_symbol'] = launch_symbol
+            if dispatch:
+                cfg.update({'dispatch_call': True, 'send': False})
             result = candidate.run_injection(cfg, work)
             try:
                 if interrupt:
@@ -164,7 +171,13 @@ class NativeCandidateTests(unittest.TestCase):
                     return
                 self.assertEqual(result.get('status'), 'trial_finished', (result, (work/'debugger.log').read_text()))
                 self.assertTrue(result['detached'])
-                self.assertEqual(result['armed'], not sync)
+                self.assertEqual(result['armed'], not (sync or dispatch))
+                if dispatch:
+                    self.assertTrue(result['queued_dispatch_call'])
+                    self.assertFalse((work/'worker.json.arm').exists())
+                    self.assertNotIn('event_idle_check', result)
+                    self.assertTrue(result['worker']['worker_done'])
+                    return
                 if sync:
                     self.assertTrue(result['direct_event_thread_call'])
                     self.assertTrue(result['event_idle_check']['verified'])
