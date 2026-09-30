@@ -25,15 +25,17 @@ class HighLevelCandidateTests(unittest.TestCase):
                  str(ROOT/'src/wechat_linux_cli/_native/native_highlevel_helper.c'),
                  '-o', str(library)], capture_output=True, text=True, timeout=30)
             self.assertEqual(compiler.returncode, 0, compiler.stderr)
-            call = ctypes.CDLL(str(library)).ncut_highlevel_sync
-            call.argtypes = (ctypes.c_ulong, ctypes.c_char_p, ctypes.c_size_t,
-                             ctypes.c_char_p, ctypes.c_int)
-            call.restype = ctypes.c_int
+            helper = ctypes.CDLL(str(library))
             report = Path(temp)/'unexpected-report.json'
-            for send in (0, 1):
-                with self.subTest(send=send):
-                    self.assertEqual(call(1, b'\x01\x00\x01\x00ab', 6,
-                                          str(report).encode(), send), errno.ENOSYS)
+            for symbol in ('ncut_highlevel_sync', 'ncut_highlevel_enqueue'):
+                call = getattr(helper, symbol)
+                call.argtypes = (ctypes.c_ulong, ctypes.c_char_p, ctypes.c_size_t,
+                                 ctypes.c_char_p, ctypes.c_int)
+                call.restype = ctypes.c_int
+                for send in (0, 1):
+                    with self.subTest(symbol=symbol, send=send):
+                        self.assertEqual(call(1, b'\x01\x00\x01\x00ab', 6,
+                                              str(report).encode(), send), errno.ENOSYS)
             self.assertFalse(report.exists())
 
     def test_payload_is_bounded_exact_native_id_and_utf8(self):
