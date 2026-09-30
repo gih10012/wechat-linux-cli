@@ -20,7 +20,7 @@ class HighLevelCandidateTests(unittest.TestCase):
         from wechat_linux_cli._native import native_send_candidate as base
         with tempfile.TemporaryDirectory() as temp:
             library = base.compile_helper(
-                Path(temp), source=ROOT/'src/wechat_linux_cli/_native/native_highlevel_helper.c',
+                Path(temp), source=Path(base.__file__).with_name('native_highlevel_helper.c'),
                 highlevel_dispatch=True)
             helper = ctypes.CDLL(str(library))
             report = Path(temp)/'must-not-exist.json'
@@ -42,7 +42,7 @@ class HighLevelCandidateTests(unittest.TestCase):
         from wechat_linux_cli._native import native_send_candidate as base
         with tempfile.TemporaryDirectory() as temp:
             library = base.compile_helper(
-                Path(temp), source=ROOT/'src/wechat_linux_cli/_native/native_highlevel_helper.c',
+                Path(temp), source=Path(base.__file__).with_name('native_highlevel_helper.c'),
                 highlevel_dispatch=True, highlevel_send=True)
             call = ctypes.CDLL(str(library)).ncut_highlevel_sync
             call.argtypes = (ctypes.c_ulong, ctypes.c_char_p, ctypes.c_size_t,
