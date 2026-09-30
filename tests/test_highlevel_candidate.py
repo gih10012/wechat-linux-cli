@@ -35,6 +35,24 @@ class HighLevelCandidateTests(unittest.TestCase):
             self.assertFalse(report.exists())
             with self.assertRaisesRegex(ValueError, 'pinned high-level helper'):
                 base.compile_helper(Path(temp), highlevel_dispatch=True)
+            with self.assertRaisesRegex(ValueError, 'requires queued dispatch'):
+                base.compile_helper(Path(temp), highlevel_send=True)
+
+    def test_queued_send_build_still_rejects_synchronous_entry(self):
+        from wechat_linux_cli._native import native_send_candidate as base
+        with tempfile.TemporaryDirectory() as temp:
+            library = base.compile_helper(
+                Path(temp), source=ROOT/'src/wechat_linux_cli/_native/native_highlevel_helper.c',
+                highlevel_dispatch=True, highlevel_send=True)
+            call = ctypes.CDLL(str(library)).ncut_highlevel_sync
+            call.argtypes = (ctypes.c_ulong, ctypes.c_char_p, ctypes.c_size_t,
+                             ctypes.c_char_p, ctypes.c_int)
+            call.restype = ctypes.c_int
+            report = Path(temp)/'must-not-exist.json'
+            for send in (0, 1):
+                self.assertEqual(call(1, b'\x01\x00\x01\x00ab', 6,
+                                      str(report).encode(), send), errno.ENOSYS)
+            self.assertFalse(report.exists())
 
     def test_send_requires_completed_queued_preflight_for_same_client(self):
         request_id = 'test-queued-proof-01'
