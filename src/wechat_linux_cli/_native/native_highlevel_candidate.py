@@ -14,6 +14,8 @@ import time
 from . import native_send_candidate as base
 from .native_send_probe import desktop_identity, run_desktop_preparation
 
+LIVE_HIGHLEVEL_PREFLIGHT_ENABLED = False
+
 
 def payload_for(recipient, text):
     if (not isinstance(recipient, str) or not re.fullmatch(r'[A-Za-z0-9_.@-]{1,128}', recipient)
@@ -58,6 +60,10 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
             return {'result_path': str(work/'result.json'), 'replayed': True,
                     **json.loads((work/'result.json').read_text())}
         raise ValueError('REQUEST_PENDING: inspect the existing request before retrying')
+    if not LIVE_HIGHLEVEL_PREFLIGHT_ENABLED:
+        raise ValueError(
+            'HIGHLEVEL_PREFLIGHT_DISABLED: the live trial crashed while resolving '
+            'the active coroutine context; saved results remain readable')
     if uid == 0 or (os.geteuid() != 0 and not base.has_ptrace_capability()):
         raise ValueError('PRIVILEGE_REQUIRED: owner-scoped ptrace capability is required')
     targets = []

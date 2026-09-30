@@ -58,6 +58,17 @@ class HighLevelCandidateTests(unittest.TestCase):
                                        text=True, timeout=10)
             self.assertIn('highlevel fixture passed', completed.stdout)
 
+    def test_new_preflight_is_disabled_before_any_process_preparation(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+                os.environ, {'WECHAT_LINUX_RUNTIME_DIR': temp}), patch.object(
+                native_highlevel_candidate, 'run_desktop_preparation') as prepare:
+            with self.assertRaisesRegex(ValueError, 'HIGHLEVEL_PREFLIGHT_DISABLED'):
+                native_highlevel_candidate.trial(
+                    False, 'HELLO', 'test-disabled-preflight', event_tid=12,
+                    expected_pid=10, expected_start_time=99)
+            prepare.assert_not_called()
+            self.assertEqual(list(Path(temp).iterdir()), [])
+
     def test_same_preflight_id_replays_record_without_a_new_native_call(self):
         request_id = 'test-replay-highlevel-1'
         payload = native_highlevel_candidate.payload_for('filehelper', 'HELLO')
