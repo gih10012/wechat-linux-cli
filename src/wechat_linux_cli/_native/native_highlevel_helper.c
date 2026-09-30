@@ -14,6 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <asm/prctl.h>
+#include <sys/syscall.h>
 
 #ifndef NCUT_ALLOW_HIGHLEVEL_SEND
 #define NCUT_ALLOW_HIGHLEVEL_SEND 0
@@ -49,6 +51,16 @@ static uint32_t result_code0, result_code1;
 static unsigned char payload[2048];
 static size_t payload_size;
 
+/* The pinned manager getter dereferences FS-0x78 without a null check.
+ * Read the active coroutine only; never fabricate or change client TLS. */
+static int native_context_available(void) {
+    unsigned long fs_base = 0;
+    if (syscall(SYS_arch_prctl, ARCH_GET_FS, &fs_base) || fs_base < 0x78)
+        return 0;
+    return *(void **)(fs_base - 0x78) != NULL;
+}
+static int (*context_available)(void) = native_context_available;
+
 static int report_locked(void) {
     if (output_fd < 0) return 0;
     char json[512];
@@ -82,6 +94,7 @@ static int report(void) {
 static void perform_native(void) {
     Shared app = {0}, services = {0}, manager = {0}, request = {0};
     _Alignas(16) unsigned char result[0x30] = {0};
+    if (!context_available()) { failure = 14; goto release; }
     api.current_app(&app);
     if (!app.object || !app.control) { failure = 2; goto release; }
     api.services(&services, app.object);

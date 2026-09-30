@@ -8,6 +8,8 @@ static int releases, requests, sends, result_destroys, recipient_assigns, text_a
 static int bad_manager;
 static _Thread_local int active_context;
 static int require_context;
+static int missing_context;
+static int fake_context_available(void) { return !missing_context && (!require_context || active_context); }
 static void *observed_dispatcher;
 static int dispatcher_release_checks;
 
@@ -188,9 +190,13 @@ static void run_dispatch_case(int cancel, int bad_output, int missing_scheduler)
 }
 
 int main(void) {
+    context_available = fake_context_available;
     image_base = 0;
     api = (NativeApi){fake_app, fake_services, fake_manager, fake_request,
                       fake_assign, fake_send, fake_result_destroy, fake_shared_destroy};
+    missing_context = 1;
+    run_case(0, 0, 14, 0, 0, 0, 0);
+    missing_context = 0;
     run_case(0, 0, 0, 1, 0, 4, 0);
     run_case(1, 0, 0, 1, 1, 4, 0);
     run_case(1, 1, 4, 0, 0, 3, 0);
