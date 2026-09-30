@@ -16,6 +16,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class HighLevelCandidateTests(unittest.TestCase):
+    def test_dispatch_build_keeps_sync_and_send_disabled(self):
+        from wechat_linux_cli._native import native_send_candidate as base
+        with tempfile.TemporaryDirectory() as temp:
+            library = base.compile_helper(
+                Path(temp), source=ROOT/'src/wechat_linux_cli/_native/native_highlevel_helper.c',
+                highlevel_dispatch=True)
+            helper = ctypes.CDLL(str(library))
+            report = Path(temp)/'must-not-exist.json'
+            for symbol, send in [('ncut_highlevel_sync', 0), ('ncut_highlevel_sync', 1),
+                                 ('ncut_highlevel_enqueue', 1)]:
+                call = getattr(helper, symbol)
+                call.argtypes = (ctypes.c_ulong, ctypes.c_char_p, ctypes.c_size_t,
+                                 ctypes.c_char_p, ctypes.c_int)
+                call.restype = ctypes.c_int
+                self.assertEqual(call(1, b'\x01\x00\x01\x00ab', 6,
+                                      str(report).encode(), send), errno.ENOSYS)
+            self.assertFalse(report.exists())
+            with self.assertRaisesRegex(ValueError, 'pinned high-level helper'):
+                base.compile_helper(Path(temp), highlevel_dispatch=True)
+
     def test_production_helper_rejects_preflight_and_send_before_target_access(self):
         with tempfile.TemporaryDirectory() as temp:
             library = Path(temp)/'helper.so'
@@ -68,7 +88,7 @@ class HighLevelCandidateTests(unittest.TestCase):
                 native_highlevel_candidate, 'run_desktop_preparation') as prepare:
             with self.assertRaisesRegex(ValueError, 'HIGHLEVEL_PREFLIGHT_DISABLED'):
                 native_highlevel_candidate.trial(
-                    False, 'HELLO', 'test-disabled-preflight', event_tid=12,
+                    False, 'HELLO', 'test-disabled-preflight',
                     expected_pid=10, expected_start_time=99)
             prepare.assert_not_called()
             self.assertEqual(list(Path(temp).iterdir()), [])

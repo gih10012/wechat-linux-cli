@@ -41,8 +41,8 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
     if send:
         raise ValueError('HIGHLEVEL_SEND_NOT_READY: event-thread call path is not verified')
     if not all(isinstance(value, int) and value > 0
-               for value in (event_tid, expected_pid, expected_start_time)):
-        raise ValueError('Observed event TID, client PID and start time are required')
+               for value in (expected_pid, expected_start_time)):
+        raise ValueError('Observed client PID and start time are required')
     payload = payload_for(recipient, text)
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{3,79}', request_id):
         raise ValueError('request-id must be 4..80 ASCII letters/digits/dot/underscore/hyphen')
@@ -82,8 +82,6 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
     start = (target/'stat').read_text().rsplit(')', 1)[1].split()[19]
     if pid != expected_pid or start != str(expected_start_time):
         raise ValueError('Client process identity changed since the read-only observation')
-    if not Path('/proc', str(pid), 'task', str(event_tid)).exists():
-        raise ValueError('Observed event thread no longer exists')
     if not base.process_running_untraced(pid, start):
         raise ValueError('Client is already traced, stopped or exiting')
     with desktop_identity(uid, owner.pw_gid):
@@ -98,13 +96,14 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
         prepared = run_desktop_preparation(target, work, uid, owner.pw_gid)
         stage = 'compile_helper'
         helper = base.compile_helper(work, uid, owner.pw_gid,
-                                     source=Path(__file__).with_name('native_highlevel_helper.c'))
+                                     source=Path(__file__).with_name('native_highlevel_helper.c'),
+                                     highlevel_dispatch=True)
         config = {**prepared, 'pid': pid, 'start_time': start, 'uid': uid, 'gid': owner.pw_gid,
                   'binary_copy': str(work/'wechat.elf'), 'helper': str(helper),
                   'injection_result': str(work/'injection.json'),
                   'worker_result': str(work/'worker.json'), 'payload_hex': payload.hex(),
-                  'send': send, 'launch_symbol': 'ncut_highlevel_sync',
-                  'sync_call': True, 'event_tid': event_tid}
+                  'send': False, 'launch_symbol': 'ncut_highlevel_enqueue',
+                  'sync_call': False, 'dispatch_call': True}
         stage = 'run_injection'
         result = base.run_injection(config, work)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
@@ -138,8 +137,12 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
     result['highlevel_preflight_verified'] = bool(
         result.get('status') == 'trial_finished' and result.get('detached')
         and result['client_running_untraced'] and worker.get('worker_done')
+        and result.get('queued_dispatch_call') and not result.get('armed')
+        and not worker.get('live_callbacks') and not worker.get('dispatch_pending')
         and not worker.get('failure')
+        and not worker.get('submission_entered')
         and worker.get('manager_verified') and worker.get('request_constructed'))
+    result['helper_unload_policy'] = 'small_module_remains_until_client_exit_for_callback_safety'
     result['native_submission_entered'] = bool(send and worker.get('submission_entered'))
     result['local_insert_result_success'] = (bool(worker.get('result_success'))
                                              if send and worker.get('result_returned') else None)
@@ -157,7 +160,7 @@ def main(argv=None):
     parser.add_argument('--request-id', required=True)
     parser.add_argument('--text', required=True)
     parser.add_argument('--recipient', default='filehelper')
-    parser.add_argument('--event-tid', type=int, required=True)
+    parser.add_argument('--event-tid', type=int, help='Legacy option; queued preflight does not select this thread')
     parser.add_argument('--expected-pid', type=int, required=True)
     parser.add_argument('--expected-start-time', type=int, required=True)
     args = parser.parse_args(argv)

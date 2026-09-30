@@ -112,12 +112,15 @@ def save(path, value):
     temp.replace(path)
 
 
-def compile_helper(work, uid=None, gid=None, source=None):
+def compile_helper(work, uid=None, gid=None, source=None, *, highlevel_dispatch=False):
     output = work/'helper.so'
     source = HERE/'native_send_helper.c' if source is None else Path(source)
+    if highlevel_dispatch and source.resolve() != (HERE/'native_highlevel_helper.c').resolve():
+        raise ValueError('Dispatch compilation requires the pinned high-level helper')
+    definitions = ['-DNCUT_ALLOW_HIGHLEVEL_DISPATCH=1'] if highlevel_dispatch else []
     identity = {'user': uid, 'group': gid, 'extra_groups': []} if uid is not None and os.geteuid() == 0 else {}
     subprocess.run(['/usr/bin/gcc', '-shared', '-fPIC', '-O2', '-std=c11', '-Wall',
-                    '-Wextra', '-Werror', '-pthread', str(source),
+                    '-Wextra', '-Werror', '-pthread', *definitions, str(source),
                     '-o', str(output)], check=True, capture_output=True, timeout=30, **identity)
     output.chmod(0o600)
     return output
