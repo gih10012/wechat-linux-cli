@@ -31,6 +31,13 @@ def parser():
     messages.add_argument('--before', type=int, help='Exclusive Unix timestamp')
     messages.add_argument('--since', type=int, help='Inclusive Unix timestamp')
     messages.add_argument('--max-chars', type=int, default=1000)
+    moments = operations.add_parser('moments', help='Read full locally loaded Moments, optionally for one person')
+    moments.add_argument('--account', default='me')
+    moments.add_argument('--user', help='Exact native user ID or unique full contact name')
+    moments.add_argument('--limit', type=int, default=20)
+    moments.add_argument('--cursor', help='next_cursor from the previous page of the same query')
+    moments.add_argument('--all', dest='all_pages', action='store_true', help='Read all currently loaded pages')
+    moments.add_argument('--include-xml', action='store_true')
     operations.add_parser('service-status', help='Check the installed local control service')
     operations.add_parser('inspect-pending', help='Inspect an unfinished operation without sending again')
     capture = operations.add_parser('capture-keys', help='Read keys once from the owner\'s running client through the service')
@@ -75,6 +82,9 @@ def parser():
 
 def run(argv=None):
     args = parser().parse_args(argv)
+    if args.operation == 'moments':
+        from ._native import native_moments
+        return native_moments.read(args.account, args.user, args.limit, args.cursor, args.all_pages, args.include_xml)
     if args.operation == 'service-status':
         return client.call({'operation': 'health'})
     if args.operation == 'inspect-pending':

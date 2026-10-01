@@ -11,6 +11,7 @@
 | 能力 | 验证范围 |
 | --- | --- |
 | 本地会话与消息读取 | 已从独立 wheel 安装，仓库外隔离运行并读取真实账号 |
+| 朋友圈读取 | 全部已加载动态或指定人，默认20条分页、完整字段及`--all`；正常微信窗口加载更早历史后读回已验收，远端同步范围单独报告 |
 | 本机 Unix 控制服务 | 临时无特权进程的健康检查、权限拒绝及退出清理通过 |
 | 一次 sudo 安装、特权自启动服务 | 真实部署、自启动 enabled、桌面 UID/CAP_SYS_PTRACE 及 root 代码所有权均已核对 |
 | 原生文字发送 | 普通 CLI filehelper 手机单次收件、Linux 显示与防重；个人微信→ClawBot→本人文字往返已实测 |
@@ -47,6 +48,22 @@ python3 -m venv .venv
 ```
 
 测试覆盖数据库页认证、WAL 已提交帧快照、密钥候选验证和读取筛选；离线测试不代表真实收件、客户端入库或服务验收。
+
+## 朋友圈读取
+
+```bash
+wechat-linux moments --limit 20
+wechat-linux moments --cursor '上一页的 next_cursor'
+wechat-linux moments --user '精确微信用户ID或唯一完整联系人名称' --limit 20
+wechat-linux moments --all
+wechat-linux moments --user '精确微信用户ID' --all --include-xml
+```
+
+默认每页20条，`--limit`范围1..100。续页须保持相同账号和用户筛选；`--all`返回全部已加载条目，带游标时返回其后全部条目。64位动态ID以字符串返回，按无符号ID倒序分页，不因SQLite的有符号边界漏条或重复。用户名称必须唯一完整匹配，不猜同名对象。
+
+每条包含未截断正文、作者、时间、内容类型、位置、全部媒体引用及客户端可见点赞/评论；`details`保留其他XML节点、重复项和属性，`--include-xml`额外返回原始XML。图片/视频引用含私有资源参数，输出应存入本机私有目录；这里没有下载或解码媒体文件。解析失败的条目保留ID并返回`content_complete:false`和`parse_error`。
+
+此命令从`sns/sns.db`的已认证只读快照读取，无需sudo、调试器或辅助服务，不写源数据库。`cached_history_exhausted`只表示当前缓存已读完，`server_history_complete`和`server_sync_verified`保持false。CLI不主动请求云端历史；需要更新或全部可见历史时，上层skill通过computer-use打开正常微信朋友圈/指定人相册并加载更早页面，再调用此命令。完整范围以微信实际允许查看的时间段和明确的窗口末尾为准；网络失败或缓存数量暂时不变不能判定云端历史读完。历史缓存中也可能保留当前窗口不再显示的旧条目，应标明来源和快照时间。
 
 图片使用 `wechat-linux send-image --recipient filehelper --file /绝对路径/image.png --request-id 本次唯一ID`，支持 PNG/JPEG、单个文件最多 10 MiB。服务先保存私有快照，构造预检与发送绑定同一目标、客户端及图片哈希。同 ID/目标/图片字节返回旧结果，改文件名不会重发，内容或格式动作冲突会拒绝。图片数据库类型读回仅提供候选记录，内容、UI 和收件仍需独立验收。原生表情包和媒体 OneBot 动作继续开发，不能把普通图片当作这些格式已完成。
 
