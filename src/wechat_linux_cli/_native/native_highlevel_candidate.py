@@ -17,6 +17,7 @@ import time
 
 from . import native_send_candidate as base
 from .native_send_probe import desktop_identity, run_desktop_preparation
+from .. import media
 
 LIVE_HIGHLEVEL_PREFLIGHT_ENABLED = False
 LIVE_HIGHLEVEL_SEND_ENABLED = False
@@ -58,6 +59,7 @@ def inspect_trial(request_id, send=True):
         proof = json.loads((work/'acceptance.json').read_text())
         if proof.get('request_id') == request_id:
             for key in ('local_history_integrated', 'local_history_exact_matches',
+                        'local_history_type_matches', 'local_history_source',
                         'local_message_id', 'server_message_id', 'recipient_delivery_verified',
                         'linux_ui_verified', 'replay_verified'):
                 if key in proof:
@@ -94,17 +96,23 @@ def client_identity():
     return int(target.name), start
 
 
-def require_preflight(root, request_id, pid, start_time):
+def require_preflight(root, request_id, pid, start_time, *, request_kind='text', media_sha256=None,
+                      recipient=None):
     if not isinstance(request_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{3,79}', request_id):
         raise ValueError('VERIFIED_PREFLIGHT_REQUIRED: a preflight request ID is required')
     work = root/('preflight-' + hashlib.sha256(request_id.encode()).hexdigest()[:24])
     result = json.loads((work/'result.json').read_text())
     config = json.loads((work/'config.json').read_text())
+    media_target_matches = (request_kind == 'text' or recipient is None or
+                           json.loads((work/'request.json').read_text()).get('recipient') == recipient)
     worker = result.get('worker', {})
     if not (result.get('request_id') == request_id and result.get('highlevel_preflight_verified')
             and result.get('detached') and result.get('queued_dispatch_call')
             and config.get('pid') == pid and str(config.get('start_time')) == str(start_time)
             and config.get('send') is False and config.get('launch_symbol') == 'ncut_highlevel_enqueue'
+            and config.get('request_kind', 'text') == request_kind
+            and (request_kind == 'text' or config.get('media_sha256') == media_sha256)
+            and media_target_matches
             and worker.get('worker_done') and worker.get('manager_verified')
             and worker.get('request_constructed') and not worker.get('failure')
             and not worker.get('submission_entered') and not worker.get('live_callbacks')
@@ -114,13 +122,26 @@ def require_preflight(root, request_id, pid, start_time):
 
 def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
           expected_pid=None, expected_start_time=None, preflight_request_id=None,
-          allow_live=False):
+          allow_live=False, request_kind='text', allow_media_trial=False):
+    if request_kind not in ('text', 'image'):
+        raise ValueError('Unsupported queued request kind')
+    if request_kind != 'text' and not allow_media_trial:
+        raise ValueError('MEDIA_TRIAL_DISABLED: image requests require a reviewed one-shot trial')
     payload = payload_for(recipient, text)
     work = work_for(request_id, send)
     uid = int(os.environ.get('SUDO_UID', '0')) if os.geteuid() == 0 else os.getuid()
     owner = pwd.getpwuid(uid)
     work_root = runtime_root(owner.pw_dir)
     fingerprint = hashlib.sha256(payload).hexdigest()
+    media_bytes = None
+    media_sha256 = None
+    media_suffix = None
+    if request_kind == 'image':
+        # Read as the desktop owner, even for a root-run trial. Only regular,
+        # bounded PNG/JPEG inputs enter the experiment; snapshot before attach.
+        with desktop_identity(uid, owner.pw_gid):
+            media_bytes, media_suffix, media_sha256 = media.read_image(text)
+        fingerprint = media.image_fingerprint(recipient, media_sha256)
     if work.exists():
         previous = json.loads((work/'request.json').read_text())
         if previous.get('payload_sha256') != fingerprint or previous.get('send') != send:
@@ -137,7 +158,8 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
                for value in (expected_pid, expected_start_time)):
         raise ValueError('Observed client PID and start time are required')
     if send:
-        require_preflight(work_root, preflight_request_id, expected_pid, expected_start_time)
+        require_preflight(work_root, preflight_request_id, expected_pid, expected_start_time,
+                          request_kind=request_kind, media_sha256=media_sha256, recipient=recipient)
     if uid == 0 or (os.geteuid() != 0 and not base.has_ptrace_capability()):
         raise ValueError('PRIVILEGE_REQUIRED: owner-scoped ptrace capability is required')
     pid, start = client_identity()
@@ -151,7 +173,14 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
         work_root.chmod(0o700)
         work.mkdir(mode=0o700)
         base.save(work/'request.json', {'request_id': request_id, 'recipient': recipient,
-                                        'send': send, 'payload_sha256': fingerprint})
+                                        'send': send, 'payload_sha256': fingerprint,
+                                        'request_kind': request_kind, 'media_sha256': media_sha256})
+        if media_bytes is not None:
+            snapshot_path = work/('input' + media_suffix)
+            with snapshot_path.open('xb') as file:
+                file.write(media_bytes)
+            snapshot_path.chmod(0o600)
+            payload = payload_for(recipient, str(snapshot_path))
     config = None
     stage = 'prepare_executable'
     try:
@@ -159,14 +188,16 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
         stage = 'compile_helper'
         helper = base.compile_helper(work, uid, owner.pw_gid,
                                      source=Path(__file__).with_name('native_highlevel_helper.c'),
-                                     highlevel_dispatch=True, highlevel_send=send)
+                                     highlevel_dispatch=True, highlevel_send=send,
+                                     highlevel_image=request_kind == 'image')
         config = {**prepared, 'pid': pid, 'start_time': start, 'uid': uid, 'gid': owner.pw_gid,
                   'binary_copy': str(work/'wechat.elf'), 'helper': str(helper),
                   'injection_result': str(work/'injection.json'),
                   'worker_result': str(work/'worker.json'), 'payload_hex': payload.hex(),
                   'send': send, 'launch_symbol': 'ncut_highlevel_enqueue',
                   'sync_call': False, 'dispatch_call': True, 'highlevel_send_trial': send,
-                  'preflight_request_id': preflight_request_id}
+                  'preflight_request_id': preflight_request_id,
+                  'request_kind': request_kind, 'media_sha256': media_sha256}
         stage = 'run_injection'
         result = base.run_injection(config, work)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
@@ -196,6 +227,7 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
                 pass
     result['client_running_untraced'] = base.process_running_untraced(pid, start)
     result['request_id'] = request_id
+    result['request_kind'] = request_kind
     worker = result.get('worker', {})
     result['highlevel_preflight_verified'] = bool(
         result.get('status') == 'trial_finished' and result.get('detached')

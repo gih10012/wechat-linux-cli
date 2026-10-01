@@ -26,6 +26,9 @@
 #ifndef NCUT_ALLOW_HIGHLEVEL_DISPATCH
 #define NCUT_ALLOW_HIGHLEVEL_DISPATCH 0
 #endif
+#ifndef NCUT_HIGHLEVEL_IMAGE_REQUEST
+#define NCUT_HIGHLEVEL_IMAGE_REQUEST 0
+#endif
 
 typedef struct { void *object; void *control; } Shared;
 typedef struct {
@@ -121,7 +124,8 @@ static void perform_native(void) {
 
     api.request(&request, NULL);
     if (!request.object || !request.control ||
-        *(uintptr_t *)request.object != image_base + 0xa899f78 ||
+        *(uintptr_t *)request.object != image_base +
+            (NCUT_HIGHLEVEL_IMAGE_REQUEST ? 0xa899fc8 : 0xa899f78) ||
         *(uint32_t *)((unsigned char *)request.object + 0x7c) != 1) {
         failure = 5; goto release;
     }
@@ -131,9 +135,16 @@ static void perform_native(void) {
         recipient_size + text_size + 4 != payload_size) {
         failure = 6; goto release;
     }
-    *(uint32_t *)((unsigned char *)request.object + 0xe4) = 1;
+    *(uint32_t *)((unsigned char *)request.object + 0xe4) =
+        NCUT_HIGHLEVEL_IMAGE_REQUEST ? 3 : 1;
     api.assign((unsigned char *)request.object + 0x90, payload + 4, recipient_size);
-    api.assign((unsigned char *)request.object + 0x5c8,
+    /* The observed image source uses its native path at common-base +0xf0.
+     * That path owns the same 24-byte libc++ string storage as assign(),
+     * and the common base destructor releases it. Its media fields remain
+     * constructor initialized; the client pipeline prepares/uploads the file.
+     * This is a separately compiled trial, unavailable to the text service. */
+    api.assign((unsigned char *)request.object +
+               (NCUT_HIGHLEVEL_IMAGE_REQUEST ? 0xf0 : 0x5c8),
                payload + 4 + recipient_size, text_size);
     request_constructed = 1;
     report();
@@ -181,7 +192,8 @@ static int initialize(uintptr_t base, const void *data, size_t length,
         .current_app = (void *)(base + 0x603d3a0),
         .services = (void *)(base + 0x6198050),
         .manager = (void *)(base + 0x61a8af0),
-        .request = (void *)(base + 0x4a01e80),
+        .request = (void *)(base +
+            (NCUT_HIGHLEVEL_IMAGE_REQUEST ? 0x4a01cf0 : 0x4a01e80)),
         .assign = (void *)(base + 0x450cf10),
         .send = (void *)(base + 0x64c7b40),
         .result_destroy = (void *)(base + 0x64c8940),

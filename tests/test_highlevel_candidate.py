@@ -115,10 +115,12 @@ class HighLevelCandidateTests(unittest.TestCase):
                     native_highlevel_candidate.payload_for(recipient, text)
 
     def test_native_lifecycle_preflight_send_and_manager_rejection(self):
-        with tempfile.TemporaryDirectory() as temp:
+        for image in (False, True):
+          with self.subTest(image=image), tempfile.TemporaryDirectory() as temp:
             binary = Path(temp)/'fixture'
             compiler = subprocess.run(['/usr/bin/gcc', '-O2', '-std=c11', '-Wall', '-Wextra',
                                        '-Werror', '-pthread',
+                                       *(['-DNCUT_HIGHLEVEL_IMAGE_REQUEST=1'] if image else []),
                                        str(ROOT/'tests/native_highlevel_fixture.c'),
                                        '-o', str(binary)], capture_output=True, text=True,
                                       timeout=30)
@@ -126,6 +128,42 @@ class HighLevelCandidateTests(unittest.TestCase):
             completed = subprocess.run([str(binary)], check=True, capture_output=True,
                                        text=True, timeout=10)
             self.assertIn('highlevel fixture passed', completed.stdout)
+
+    def test_media_gate_precedes_file_and_process_access(self):
+        with patch.object(native_highlevel_candidate, 'run_desktop_preparation') as prepare:
+            with self.assertRaisesRegex(ValueError, 'MEDIA_TRIAL_DISABLED'):
+                native_highlevel_candidate.trial(False, '/missing.png', 'image-test-01',
+                                                request_kind='image', allow_live=True)
+            prepare.assert_not_called()
+
+    def test_image_proof_cannot_use_text_preflight(self):
+        request_id = 'test-image-proof-01'
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            work = root/('preflight-' + hashlib.sha256(request_id.encode()).hexdigest()[:24])
+            work.mkdir()
+            (work/'result.json').write_text(json.dumps({'request_id': request_id,
+                'highlevel_preflight_verified': True, 'detached': True,
+                'queued_dispatch_call': True, 'worker': {'worker_done': True,
+                'manager_verified': True, 'request_constructed': True,
+                'live_callbacks': 0, 'dispatch_pending': False}}))
+            config = {'pid': 10, 'start_time': 99, 'send': False,
+                      'launch_symbol': 'ncut_highlevel_enqueue'}
+            (work/'config.json').write_text(json.dumps(config))
+            with self.assertRaisesRegex(ValueError, 'VERIFIED_PREFLIGHT_REQUIRED'):
+                native_highlevel_candidate.require_preflight(root, request_id, 10, 99,
+                    request_kind='image', media_sha256='a' * 64)
+            config.update(request_kind='image', media_sha256='a' * 64)
+            (work/'config.json').write_text(json.dumps(config))
+            (work/'request.json').write_text(json.dumps({'recipient': 'filehelper'}))
+            native_highlevel_candidate.require_preflight(root, request_id, 10, 99,
+                request_kind='image', media_sha256='a' * 64, recipient='filehelper')
+            with self.assertRaisesRegex(ValueError, 'VERIFIED_PREFLIGHT_REQUIRED'):
+                native_highlevel_candidate.require_preflight(root, request_id, 10, 99,
+                    request_kind='image', media_sha256='a' * 64, recipient='fixture@weclaw')
+            with self.assertRaisesRegex(ValueError, 'VERIFIED_PREFLIGHT_REQUIRED'):
+                native_highlevel_candidate.require_preflight(root, request_id, 10, 99,
+                    request_kind='image', media_sha256='b' * 64)
 
     def test_new_preflight_is_disabled_before_any_process_preparation(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(

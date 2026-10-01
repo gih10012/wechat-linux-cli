@@ -46,12 +46,13 @@ sudo /usr/bin/python3 -I "$PWD/src/wechat_linux_cli/install.py" \
 wechat-linux service-status
 wechat-linux inspect-pending
 wechat-linux send-text --recipient filehelper --text '消息文字' --request-id '本次唯一ID'
+wechat-linux send-image --recipient filehelper --file /绝对路径/image.png --request-id '图片唯一ID'
 wechat-linux send-status --request-id '原ID'
 systemctl status "wechat-linux-cli@$(id -u).service"
 journalctl -u "wechat-linux-cli@$(id -u).service" -n 50 --no-pager
 ```
 
-发送接受任意精确会话 ID（私聊或群聊），授权由调用 skill/agent 根据用户当前任务或事先直接/间接授权判断，CLI 不内置收件人授权白名单。真实收发验收目前覆盖 filehelper 和 ClawBot 文字，其他目标/格式据实际结果分别记录。服务串行执行一次不发送的客户端排队构造预检，再用同一 PID/启动时间调用客户端真实消息创建入口；不能使用旧同步入口。相同 ID/正文/目标只返回已有结果，旧低层请求仍保留防重。`ok` 表示客户端提交调用成功，`local_history_integrated` 根据发送前后的独立本地快照记录；读取密钥缺失或读回不明确时为 null，不据此重发。手机投递、客户端 UI 显示不是 API 成功值或数据库记录的推论。请先检查原请求及接收端，未知结果没有自动重试。
+发送接受任意精确会话 ID（私聊或群聊），授权由调用 skill/agent 根据用户当前任务或事先直接/间接授权判断，CLI 不内置收件人授权白名单。真实收发验收覆盖 filehelper 和 ClawBot 文字；2026-10-01 普通 CLI PNG/JPEG→ClawBot 经单次 iLink 入站下载、原文件字节对比及 Linux UI 确认，其他目标/格式据实际结果分别记录。服务串行执行一次不发送的客户端排队构造预检，再用同一 PID/启动时间调用客户端真实消息创建入口；不能使用旧同步入口。相同 ID/正文/目标只返回已有结果，旧低层请求仍保留防重。`ok` 表示客户端提交调用成功，`local_history_integrated` 根据发送前后的独立本地快照记录；读取密钥缺失或读回不明确时为 null，不据此重发。手机投递、客户端 UI 显示不是 API 成功值或数据库记录的推论。请先检查原请求及接收端，未知结果没有自动重试。
 
 首次读取缺少密钥时，服务提供 `wechat-linux capture-keys --account me --seconds 15`。该命令通过受限服务只读扫描当前用户的微信进程内存，验证候选密钥后写入私有文件，响应不输出密钥；扫描时间可设为 1–45 秒。接口已通过离线测试，尚未完成部署后的真实采集验收。已有密钥时可继续直接读取本地数据库。
 
@@ -75,7 +76,7 @@ sudo systemctl disable "wechat-linux-cli@$(id -u).service"
 | `/run/wechat-linux-cli-<UID>/` | 桌面用户，`0700`；控制 socket 和进程锁，保留至重启或明确清理 |
 | `~/.local/state/wechat-linux-cli/service/` | 桌面用户；未完成任务记录及后端结果 |
 | `~/.local/state/wechat-linux-cli/native-send/` | 桌面用户；原生任务状态、调试日志和任务构建产物 |
-| `~/.local/state/wechat-linux-cli/native-highlevel/` | 桌面用户；排队构造预检、文字提交及独立本地读回证据 |
+| `~/.local/state/wechat-linux-cli/native-highlevel/` | 桌面用户；排队构造预检、文字/图片提交、私有图片快照及独立读回证据 |
 | `~/.local/state/wechat-personal/native-keys/` | 桌面用户；现有本地读取密钥，文件须为 `0600` |
 
 已有 `~/.local/state/ncut-wechat-skills/native-send-trial/` 时，原生任务继续使用该位置，以保留既有 request ID 和重试判断。状态、结果及调试文件可能包含账号信息或消息内容，不进入仓库。服务重装或升级前应保留这些私有状态；当前安装器没有自动升级、卸载或迁移入口。
@@ -83,3 +84,5 @@ sudo systemctl disable "wechat-linux-cli@$(id -u).service"
 unit 显式设置桌面用户的 `HOME` 和受限 `PATH`，不继承普通终端的自定义状态目录环境变量。需要调整目录时应单独审阅服务配置，再核对相应目录所有权和权限。
 
 2026-09-30 真实部署时已核对代码/解释器/命令/unit 为 root 所有，控制目录/socket 为桌面用户且权限分别 0700/0600，服务以桌面 UID 仅带 CAP_SYS_PTRACE 运行。普通用户命令从仓库外实际读写成功。发送结束且任务归零后的一次空闲采样约 12 MiB、1 个任务；这是单次采样，不是长期资源上限。离线包更新曾通过等待服务安全结束、替换已校验包、重启及健康检查，保留旧包和私有防重状态；当前公共安装器仍是首次安装入口。
+
+图片输入为绝对路径、1 字节到 10 MiB 的常规 PNG/JPEG 文件，服务以桌面用户权限读取，不接收任意 shell 命令。FIFO 和其他特殊文件在打开后检查拒绝，不阻塞等待读取。`native-highlevel/media-inputs/` 保留每个图片请求的私有快照与内容身份；预检和提交均使用快照，原文件中途变化不会替换发送内容。快照包含图片正文，不发布到仓库；保留请求及防重记录后才可另行规划清理。默认图片读回的类型候选不证明图片内容，`local_history_integrated` 保持 null，只有独立验收才能另写确认。

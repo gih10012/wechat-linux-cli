@@ -92,7 +92,7 @@ def terminal_preflight(result, request_id):
         return False
     return (result.get('status') == 'local_failure'
             and result.get('stage') in ('prepare_executable', 'compile_helper')
-            or result.get('code') == 'NATIVE_OPERATION_FAILED')
+            or result.get('code') in ('NATIVE_OPERATION_FAILED', 'REQUEST_ID_CONFLICT', 'REQUEST_PENDING'))
 
 
 class Runner:
@@ -275,16 +275,19 @@ class Service:
                     and state.get('last_result')):
                 return {'ok': True, 'read_only': True, **state['last_result']}
             return {**backend.inspect_trial(request['request_id']), 'ok': False}
-        if operation != 'send_text' or set(request) != {'operation', 'text', 'request_id', 'recipient'}:
+        field = {'send_text': 'text', 'send_image': 'file'}.get(operation)
+        if field is None or set(request) != {'operation', field, 'request_id', 'recipient'}:
             raise ValueError('Unsupported operation or parameters')
         # Protocol validation occurs before starting any backend process.
-        native.make_payload(int(time.time()), request['text'], request['request_id'], request['recipient'])
+        native.make_payload(int(time.time()), request[field], request['request_id'], request['recipient'])
+        if field == 'file':
+            backend.media.image_path(request[field])
         if request['request_id'] == native.REQUEST_ID:
             raise ValueError('The legacy fixed acceptance ID cannot be submitted')
         previous = backend.replay(request)
         if previous is not None:
             return previous
-        backend.highlevel.payload_for(request['recipient'], request['text'])
+        backend.highlevel.payload_for(request['recipient'], request[field])
         if self.stopping:
             return {'ok': False, 'code': 'SERVICE_STOPPING'}
         return self.runner(request)

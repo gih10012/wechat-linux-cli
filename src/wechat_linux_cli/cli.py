@@ -40,6 +40,10 @@ def parser():
     send.add_argument('--recipient', required=True, help='Exact native chat ID; resolve it with conversations')
     send.add_argument('--text', required=True)
     send.add_argument('--request-id', required=True, help='Unique ID for this operation; reuse it for the same operation only')
+    image = operations.add_parser('send-image', help='Send a PNG/JPEG through the client image pipeline')
+    image.add_argument('--recipient', required=True, help='Exact native chat ID')
+    image.add_argument('--file', required=True, help='Owner-readable PNG/JPEG, at most 10 MiB')
+    image.add_argument('--request-id', required=True)
     status_send = operations.add_parser('send-status', help='Read the recorded outcome of a prior send')
     status_send.add_argument('--request-id', required=True)
     return command
@@ -56,6 +60,11 @@ def run(argv=None):
     if args.operation == 'send-text':
         return client.call({'operation': 'send_text', 'recipient': args.recipient,
                             'text': args.text, 'request_id': args.request_id})
+    if args.operation == 'send-image':
+        from pathlib import Path
+        return client.call({'operation': 'send_image', 'recipient': args.recipient,
+                            'file': str(Path(args.file).expanduser().absolute()),
+                            'request_id': args.request_id})
     if args.operation == 'send-status':
         from pathlib import Path
         from . import service

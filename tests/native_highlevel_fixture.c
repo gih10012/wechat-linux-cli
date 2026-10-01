@@ -3,7 +3,7 @@
 #include "../src/wechat_linux_cli/_native/native_highlevel_helper.c"
 
 static unsigned char app_object[16], services_object[16], manager_object[0x910];
-static unsigned char request_object[0x610];
+static unsigned char request_object[0x640];
 static int releases, requests, sends, result_destroys, recipient_assigns, text_assigns;
 static int bad_manager;
 static _Thread_local int active_context;
@@ -31,20 +31,20 @@ static void fake_request(Shared *out, void *unused) {
     if (unused) abort();
     ++requests;
     memset(request_object, 0, sizeof(request_object));
-    *(uintptr_t *)request_object = 0xa899f78;
+    *(uintptr_t *)request_object = NCUT_HIGHLEVEL_IMAGE_REQUEST ? 0xa899fc8 : 0xa899f78;
     *(uint32_t *)(request_object + 0x7c) = 1;
     out->object = request_object; out->control = request_object;
 }
 static void fake_assign(void *dest, const void *bytes, size_t length) {
     if (dest == request_object + 0x90 && length == 10 &&
         !memcmp(bytes, "filehelper", length)) ++recipient_assigns;
-    else if (dest == request_object + 0x5c8 && length == 5 &&
+    else if (dest == request_object + (NCUT_HIGHLEVEL_IMAGE_REQUEST ? 0xf0 : 0x5c8) && length == 5 &&
              !memcmp(bytes, "HELLO", length)) ++text_assigns;
     else abort();
 }
 static void fake_send(void *out, void *manager, const Shared *request) {
     if (manager != manager_object || request->object != request_object ||
-        *(uint32_t *)(request_object + 0xe4) != 1) abort();
+        *(uint32_t *)(request_object + 0xe4) != (NCUT_HIGHLEVEL_IMAGE_REQUEST ? 3 : 1)) abort();
     ++sends;
     memset(out, 0, 0x30);
 }
