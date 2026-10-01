@@ -71,6 +71,16 @@ class UnixServiceTests(unittest.TestCase):
             self.assertFalse(client.call(changed, self.path)['ok'])
         self.assertEqual(self.calls, [request])
 
+    def test_forward_socket_validates_precise_source_and_keeps_arbitrary_target(self):
+        request = {'operation': 'forward', 'request_id': 'forward-socket-01', 'account': 'me',
+                   'chat': 'fixture-source@chatroom', 'local_id': 42, 'database': 'message/message_0.db',
+                   'recipient': 'fixture-target@chatroom'}
+        self.assertTrue(client.call(request, self.path)['ok'])
+        self.assertEqual(self.calls, [request])
+        for change in ({'local_id': True}, {'local_id': 0}, {'chat': 'display name'},
+                       {'database': []}, {'text': 'extra'}):
+            self.assertFalse(client.call({**request, **change}, self.path)['ok'])
+        self.assertEqual(self.calls, [request])
     def test_conflicting_listener_is_rejected_without_unlinking_live_socket(self):
         with self.assertRaises(BlockingIOError):
             service.Service(self.path, lambda _: None)

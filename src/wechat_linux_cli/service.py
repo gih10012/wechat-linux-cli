@@ -275,7 +275,21 @@ class Service:
                     and state.get('last_result')):
                 return {'ok': True, 'read_only': True, **state['last_result']}
             return {**backend.inspect_trial(request['request_id']), 'ok': False}
-        field = {'send_text': 'text', 'send_image': 'file', 'send_file': 'file'}.get(operation)
+        if operation == 'forward':
+            if set(request) != {'operation', 'account', 'chat', 'local_id', 'database', 'recipient', 'request_id'}:
+                raise ValueError('Unsupported forward parameters')
+            native.make_payload(int(time.time()), 'forward source', request['request_id'], request['recipient'])
+            backend.highlevel.payload_for(request['chat'], 'source')
+            if (not isinstance(request['account'], str) or not request['account']
+                    or type(request['local_id']) is not int or request['local_id'] <= 0
+                    or request['database'] is not None and not isinstance(request['database'], str)):
+                raise ValueError('Invalid forward source')
+            if request['request_id'] == native.REQUEST_ID:
+                raise ValueError('The legacy fixed acceptance ID cannot be submitted')
+            if self.stopping:
+                return {'ok': False, 'code': 'SERVICE_STOPPING'}
+            return self.runner(request)
+        field = {'send_text': 'text', 'send_image': 'file', 'send_file': 'file', 'send_xml': 'file'}.get(operation)
         if field is None or set(request) != {'operation', field, 'request_id', 'recipient'}:
             raise ValueError('Unsupported operation or parameters')
         # Protocol validation occurs before starting any backend process.

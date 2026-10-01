@@ -48,6 +48,22 @@ def parser():
     file.add_argument('--recipient', required=True, help='Exact native chat ID')
     file.add_argument('--file', required=True, help='Owner-readable regular file, at most 10 MiB')
     file.add_argument('--request-id', required=True)
+    xml = operations.add_parser('send-xml', help='Construct an article or mini-program card from app-message XML')
+    xml.add_argument('--recipient', required=True, help='Exact native chat ID')
+    xml.add_argument('--file', required=True, help='UTF-8 msg/appmsg XML file, at most 64 KiB')
+    xml.add_argument('--request-id', required=True)
+    forward = operations.add_parser('forward', help='Forward a precise local article or mini-program card')
+    forward.add_argument('--account', default='me')
+    forward.add_argument('--chat', required=True, help='Exact native source chat ID')
+    forward.add_argument('--local-id', type=int, required=True)
+    forward.add_argument('--database', help='Message shard from messages output, if needed to resolve the ID')
+    forward.add_argument('--recipient', required=True, help='Exact native destination chat ID')
+    forward.add_argument('--request-id', required=True)
+    raw = operations.add_parser('message-xml', help='Read the XML of one precise local article or mini-program card')
+    raw.add_argument('--account', default='me')
+    raw.add_argument('--chat', required=True)
+    raw.add_argument('--local-id', type=int, required=True)
+    raw.add_argument('--database')
     status_send = operations.add_parser('send-status', help='Read the recorded outcome of a prior send')
     status_send.add_argument('--request-id', required=True)
     return command
@@ -64,11 +80,17 @@ def run(argv=None):
     if args.operation == 'send-text':
         return client.call({'operation': 'send_text', 'recipient': args.recipient,
                             'text': args.text, 'request_id': args.request_id})
-    if args.operation in ('send-image', 'send-file'):
+    if args.operation in ('send-image', 'send-file', 'send-xml'):
         from pathlib import Path
         return client.call({'operation': args.operation.replace('-', '_'), 'recipient': args.recipient,
                             'file': str(Path(args.file).expanduser().absolute()),
                             'request_id': args.request_id})
+    if args.operation == 'message-xml':
+        return native_messages.forward_source(args.account, args.chat, args.local_id, args.database)
+    if args.operation == 'forward':
+        return client.call({'operation': 'forward', 'account': args.account, 'chat': args.chat,
+                            'local_id': args.local_id, 'database': args.database,
+                            'recipient': args.recipient, 'request_id': args.request_id})
     if args.operation == 'send-status':
         from pathlib import Path
         from . import service

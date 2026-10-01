@@ -18,6 +18,7 @@ import time
 from . import native_send_candidate as base
 from .native_send_probe import desktop_identity, run_desktop_preparation
 from .. import media
+from .. import cards
 
 LIVE_HIGHLEVEL_PREFLIGHT_ENABLED = False
 LIVE_HIGHLEVEL_SEND_ENABLED = False
@@ -98,7 +99,7 @@ def client_identity():
 
 
 def require_preflight(root, request_id, pid, start_time, *, request_kind='text', media_sha256=None,
-                      recipient=None, media_filename=None):
+                      recipient=None, media_filename=None, source_identity=None):
     if not isinstance(request_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{3,79}', request_id):
         raise ValueError('VERIFIED_PREFLIGHT_REQUIRED: a preflight request ID is required')
     work = root/('preflight-' + hashlib.sha256(request_id.encode()).hexdigest()[:24])
@@ -114,6 +115,7 @@ def require_preflight(root, request_id, pid, start_time, *, request_kind='text',
             and config.get('request_kind', 'text') == request_kind
             and (request_kind == 'text' or config.get('media_sha256') == media_sha256)
             and (request_kind != 'file' or config.get('media_filename') == media_filename)
+            and config.get('source_identity') == source_identity
             and media_target_matches
             and worker.get('worker_done') and worker.get('manager_verified')
             and worker.get('request_constructed') and not worker.get('failure')
@@ -124,9 +126,11 @@ def require_preflight(root, request_id, pid, start_time, *, request_kind='text',
 
 def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
           expected_pid=None, expected_start_time=None, preflight_request_id=None,
-          allow_live=False, request_kind='text', allow_media_trial=False):
-    if request_kind not in ('text', 'image', 'file'):
+          allow_live=False, request_kind='text', allow_media_trial=False, source_identity=None):
+    if request_kind not in ('text', 'image', 'file', 'xml'):
         raise ValueError('Unsupported queued request kind')
+    if source_identity is not None and request_kind != 'xml':
+        raise ValueError('Forward source identity only applies to XML requests')
     if request_kind != 'text' and not allow_media_trial:
         raise ValueError('MEDIA_TRIAL_DISABLED: media requests require explicit reviewed enablement')
     payload = payload_for(recipient, text)
@@ -139,7 +143,12 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
     media_sha256 = None
     media_suffix = None
     media_filename = None
-    if request_kind == 'image':
+    if request_kind == 'xml':
+        with desktop_identity(uid, owner.pw_gid):
+            media_bytes, _metadata, media_sha256 = cards.read_xml(text)
+        media_suffix = '.xml'
+        fingerprint = cards.fingerprint(recipient, media_sha256, source_identity)
+    elif request_kind == 'image':
         # Read as the desktop owner, even for a root-run trial. Only regular,
         # bounded PNG/JPEG inputs enter the experiment; snapshot before attach.
         with desktop_identity(uid, owner.pw_gid):
@@ -167,7 +176,7 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
     if send:
         require_preflight(work_root, preflight_request_id, expected_pid, expected_start_time,
                           request_kind=request_kind, media_sha256=media_sha256, recipient=recipient,
-                          media_filename=media_filename)
+                          media_filename=media_filename, source_identity=source_identity)
     if uid == 0 or (os.geteuid() != 0 and not base.has_ptrace_capability()):
         raise ValueError('PRIVILEGE_REQUIRED: owner-scoped ptrace capability is required')
     pid, start = client_identity()
@@ -183,7 +192,8 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
         base.save(work/'request.json', {'request_id': request_id, 'recipient': recipient,
                                         'send': send, 'payload_sha256': fingerprint,
                                         'request_kind': request_kind, 'media_sha256': media_sha256,
-                                        'media_filename': media_filename})
+                                        'media_filename': media_filename,
+                                        'source_identity': source_identity})
         if media_bytes is not None:
             if request_kind == 'file':
                 (work/'input').mkdir(mode=0o700)
@@ -203,7 +213,8 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
                                      source=Path(__file__).with_name('native_highlevel_helper.c'),
                                      highlevel_dispatch=True, highlevel_send=send,
                                      highlevel_image=request_kind == 'image',
-                                     highlevel_file=request_kind == 'file')
+                                     highlevel_file=request_kind == 'file',
+                                     highlevel_xml=request_kind == 'xml')
         config = {**prepared, 'pid': pid, 'start_time': start, 'uid': uid, 'gid': owner.pw_gid,
                   'binary_copy': str(work/'wechat.elf'), 'helper': str(helper),
                   'injection_result': str(work/'injection.json'),
@@ -212,7 +223,7 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
                   'sync_call': False, 'dispatch_call': True, 'highlevel_send_trial': send,
                   'preflight_request_id': preflight_request_id,
                   'request_kind': request_kind, 'media_sha256': media_sha256,
-                  'media_filename': media_filename}
+                  'media_filename': media_filename, 'source_identity': source_identity}
         stage = 'run_injection'
         result = base.run_injection(config, work)
     except (OSError, ValueError, subprocess.SubprocessError) as error:

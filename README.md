@@ -16,6 +16,7 @@
 | 原生文字发送 | 普通 CLI filehelper 手机单次收件、Linux 显示与防重；个人微信→ClawBot→本人文字往返已实测 |
 | 原生图片发送 | 2026-10-01 普通 CLI 的 PNG/JPEG 发给 ClawBot，iLink 各单次收到、下载字节一致、Linux UI 显示；PNG 同 ID 重放未再次提交 |
 | 原生文件发送 | 2026-10-01 普通 CLI 中文文件名 TXT、ZIP→ClawBot 各单次入站，文件名/下载字节一致、ZIP完整性与Linux UI通过；同ID重放未重新提交 |
+| 原生转发与自定义 XML | 2026-10-01 普通 CLI→filehelper 公众号文章5、小程序33及修改标题/描述的 XML，独立字段/服务器 ID/Linux 卡片显示与防重通过；手机投递及点击待确认 |
 | 发送后的 Linux 本地显示 | 排队发送经真实客户端入库，本地读回一条，Linux 窗口显示获本人确认 |
 
 ## 本地安装与使用
@@ -46,6 +47,19 @@ python3 -m venv .venv
 
 测试覆盖数据库页认证、WAL 已提交帧快照、密钥候选验证和读取筛选；离线测试不代表真实收件、客户端入库或服务验收。
 
-图片使用 `wechat-linux send-image --recipient filehelper --file /绝对路径/image.png --request-id 本次唯一ID`，支持 PNG/JPEG、单个文件最多 10 MiB。服务先保存私有快照，构造预检与发送绑定同一目标、客户端及图片哈希。同 ID/目标/图片字节返回旧结果，改文件名不会重发，内容或格式动作冲突会拒绝。图片数据库类型读回仅提供候选记录，内容、UI 和收件仍需独立验收。原生表情包、公众号卡片和媒体 OneBot 动作继续开发，不能把普通图片当作这些格式已完成。
+图片使用 `wechat-linux send-image --recipient filehelper --file /绝对路径/image.png --request-id 本次唯一ID`，支持 PNG/JPEG、单个文件最多 10 MiB。服务先保存私有快照，构造预检与发送绑定同一目标、客户端及图片哈希。同 ID/目标/图片字节返回旧结果，改文件名不会重发，内容或格式动作冲突会拒绝。图片数据库类型读回仅提供候选记录，内容、UI 和收件仍需独立验收。原生表情包和媒体 OneBot 动作继续开发，不能把普通图片当作这些格式已完成。
 
 文件使用 `wechat-linux send-file --recipient 精确chat_id --file /路径/文件.zip --request-id 本次唯一ID`，支持常规文件 1 字节到 10 MiB，保留最多 255 UTF-8 字节的原文件名。预检、发送与防重绑定目标、文件名和字节哈希；改名会冲突。快照目录保留 700，文件 600，客户端可在本地插入返回后继续上传。默认同名数据库记录只是候选，`ok` 不证明上传或投递完成；未知状态保留原 ID。
+
+转发卡片和自定义 XML 使用安装后的普通命令：
+
+```bash
+wechat-linux messages --chat '精确源chat_id' --limit 20
+wechat-linux forward --chat '精确源chat_id' --local-id 123 --database message/message_0.db --recipient '精确目标chat_id' --request-id 本次唯一ID
+wechat-linux message-xml --chat '精确源chat_id' --local-id 123 --database message/message_0.db
+wechat-linux send-xml --recipient '精确目标chat_id' --file /路径/card.xml --request-id 另一唯一ID
+```
+
+`forward` 精确读取本机源消息的 appmsg XML，经客户端原生卡片解析、构造和消息创建流程发送。跨数据库分片的本地 ID 不唯一时必须指定 `database`，不自动挑选。当前支持公众号文章5、小程序33/36；实际验收覆盖5和33，36尚无真实样例验收。自定义 XML 为1..65536字节 UTF-8 `msg/appmsg` 文件，需非空标题和对应格式必需字段，不接受NUL、DTD或实体声明。客户端规范化 XML，不保证任意标签原样传输；小程序须保留真实 appid、username、页面路径和有效资源引用。合并聊天记录及其他 XML 类型仍待实现。
+
+同 ID 防重绑定目标、XML字节和源消息身份；转发与直接XML、不同源或修改内容相互冲突。原始XML、资源参数和快照仅保存在本机私有状态。`ok` 表示提交完成，`local_history_card_matches` 是新增标题/类型/URL匹配候选，手机收件和可点击另行验收。2026-10-01 普通CLI实际转发文章和小程序、发送修改标题/中文描述/换行/emoji的XML，均取得服务器ID并在Linux完整显示；独立字段读回和同ID防重通过，手机端尚待本人确认。

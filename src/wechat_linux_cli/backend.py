@@ -10,7 +10,7 @@ import time
 from ._native import native_send_candidate as native
 from ._native import native_highlevel_candidate as highlevel
 from ._native import native_messages
-from . import media
+from . import media, cards
 
 
 def preflight_id(request_id):
@@ -82,7 +82,7 @@ def replay(request):
         return None
     work = current if current.exists() else old
     recorded = json.loads((work/'request.json').read_text())
-    kind = {'send_image': 'image', 'send_file': 'file'}.get(request['operation'], 'text')
+    kind = {'send_image': 'image', 'send_file': 'file', 'send_xml': 'xml'}.get(request['operation'], 'text')
     if recorded.get('request_kind', 'text') != kind:
         matches = False
     elif kind == 'image':
@@ -93,6 +93,15 @@ def replay(request):
         _data, filename, sha256 = media.read_file(request['file'])
         matches = (work == current and recorded.get('payload_sha256') ==
                    media.file_fingerprint(request['recipient'], filename, sha256))
+    elif kind == 'xml':
+        if '_xml_data' in request:
+            data = request['_xml_data']
+            cards.parse_xml(data)
+            sha256 = hashlib.sha256(data).hexdigest()
+        else:
+            _data, _metadata, sha256 = cards.read_xml(request['file'])
+        matches = (work == current and recorded.get('payload_sha256') ==
+                   cards.fingerprint(request['recipient'], sha256, request.get('source_identity')))
     elif work == current:
         fingerprint = hashlib.sha256(highlevel.payload_for(request['recipient'], request['text'])).hexdigest()
         matches = recorded.get('payload_sha256') == fingerprint
@@ -171,7 +180,16 @@ def send_text(request):
 def stage_media(request, kind):
     """Reserve a content identity and snapshot once for construction and send."""
     from .service import private_dir, read_private, save
-    if kind == 'image':
+    if kind == 'xml':
+        if '_xml_data' in request:
+            data = request['_xml_data']
+            cards.parse_xml(data)
+            sha256 = hashlib.sha256(data).hexdigest()
+        else:
+            data, _metadata, sha256 = cards.read_xml(request['file'])
+        suffix = '.xml'
+        filename = 'input.xml'
+    elif kind == 'image':
         data, suffix, sha256 = media.read_image(request['file'])
         filename = 'input' + suffix
     else:
@@ -186,6 +204,8 @@ def stage_media(request, kind):
     expected = {'request_id': request['request_id'], 'request_kind': kind,
                 'recipient': request['recipient'], 'media_sha256': sha256,
                 'suffix': suffix, 'filename': filename}
+    if kind == 'xml':
+        expected['source_identity'] = request.get('source_identity')
     private_dir(directory/'input')
     path = directory/'input'/filename
     if manifest.exists():
@@ -232,6 +252,8 @@ def send_media(request, kind):
     proof_id = preflight_id(request['request_id'])
     options = {'expected_pid': pid, 'expected_start_time': start, 'allow_live': True,
                'request_kind': kind, 'allow_media_trial': True}
+    if kind == 'xml':
+        options['source_identity'] = request.get('source_identity')
     proof = highlevel.trial(False, path, proof_id, request['recipient'], **options)
     if not proof.get('highlevel_preflight_verified'):
         return {**proof, 'ok': False, 'phase': 'preflight',
@@ -244,6 +266,7 @@ def send_media(request, kind):
     if result['ok']:
         after = history_snapshot(request['recipient'])
         evidence = (image_history_evidence(before, after) if kind == 'image' else
+                    card_history_evidence(before, after, cards.read_xml(path)[1]) if kind == 'xml' else
                     file_history_evidence(before, after, Path(path).name))
         result.update(evidence, recipient_delivery_verified=False)
         highlevel.base.save(work_for(request['request_id'])/'acceptance.json',
@@ -273,6 +296,34 @@ def send_file(request):
     return send_media(request, 'file')
 
 
+def send_xml(request):
+    return send_media(request, 'xml')
+
+
+def send_forward(request):
+    source = native_messages.forward_source(request['account'], request['chat'],
+                                             request['local_id'], request.get('database'))
+    inner = {'operation': 'send_xml', 'recipient': request['recipient'],
+             'request_id': request['request_id'], 'source_identity': source['source_identity'],
+             '_xml_data': source['xml'].encode(), 'file': '/forward-source.xml'}
+    return send_xml(inner)
+
+
+def card_history_evidence(before, after, metadata):
+    if before is None or after is None:
+        return {'local_history_integrated': None}
+    ids = {(r['database'], r['local_id']) for r in before}
+    matches = [r for r in after if (r['database'], r['local_id']) not in ids
+               and r.get('type') == 49 and r.get('app_type') == metadata['app_type']
+               and r.get('text') == metadata['title'] and not r.get('truncated')
+               and r.get('url', '') == metadata['url']]
+    proof = {'local_history_integrated': None, 'local_history_card_matches': len(matches),
+             'local_history_source': 'local_client_database'}
+    if len(matches) == 1:
+        proof.update(local_message_id=matches[0]['local_id'], server_message_id=matches[0]['server_id'])
+    return proof
+
+
 def main():
     try:
         request = json.load(sys.stdin)
@@ -282,6 +333,10 @@ def main():
             result = send_image(request)
         elif request['operation'] == 'send_file':
             result = send_file(request)
+        elif request['operation'] == 'send_xml':
+            result = send_xml(request)
+        elif request['operation'] == 'forward':
+            result = send_forward(request)
         else:
             raise ValueError('Unsupported operation')
     except (ValueError, OSError) as error:

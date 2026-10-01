@@ -33,8 +33,11 @@
 #ifndef NCUT_HIGHLEVEL_FILE_REQUEST
 #define NCUT_HIGHLEVEL_FILE_REQUEST 0
 #endif
-#if NCUT_HIGHLEVEL_IMAGE_REQUEST && NCUT_HIGHLEVEL_FILE_REQUEST
-#error Image and file request builds are distinct
+#ifndef NCUT_HIGHLEVEL_XML_REQUEST
+#define NCUT_HIGHLEVEL_XML_REQUEST 0
+#endif
+#if NCUT_HIGHLEVEL_IMAGE_REQUEST + NCUT_HIGHLEVEL_FILE_REQUEST + NCUT_HIGHLEVEL_XML_REQUEST > 1
+#error Image, file and XML request builds are distinct
 #endif
 
 typedef struct { void *object; void *control; } Shared;
@@ -47,6 +50,11 @@ typedef struct {
     void (*send)(void *, void *, const Shared *);
     void (*result_destroy)(void *);
     void (*shared_destroy)(Shared *);
+#if NCUT_HIGHLEVEL_XML_REQUEST
+    void (*record_construct)(void *);
+    void (*record_parse)(void *);
+    void (*record_destroy)(void *);
+#endif
 } NativeApi;
 
 static NativeApi api;
@@ -58,6 +66,8 @@ static atomic_int submission_entered, result_returned, result_success, failure;
 static int live_callbacks, dispatch_pending;
 static int report_failed;
 static uint32_t result_code0, result_code1;
+static size_t parsed_title_bytes;
+static uint32_t parsed_app_type;
 static unsigned char payload[2048];
 static size_t payload_size;
 
@@ -84,17 +94,17 @@ static int (*context_available)(void) = native_context_available;
 
 static int report_locked(void) {
     if (output_fd < 0) return 0;
-    char json[512];
+    char json[768];
     int length = snprintf(json, sizeof(json),
         "{\"worker_done\":%s,\"live_callbacks\":%d,\"dispatch_pending\":%s,\"manager_verified\":%s,"
         "\"request_constructed\":%s,\"submission_entered\":%s,"
         "\"result_returned\":%s,\"result_success\":%s,"
-        "\"result_code0\":%u,\"result_code1\":%u,\"failure\":%d}\n",
+        "\"result_code0\":%u,\"result_code1\":%u,\"failure\":%d,\"parsed_app_type\":%u,\"parsed_title_bytes\":%zu}\n",
         worker_done && !dispatch_pending ? "true" : "false", live_callbacks,
         dispatch_pending ? "true" : "false", manager_verified ? "true" : "false",
         request_constructed ? "true" : "false", submission_entered ? "true" : "false",
         result_returned ? "true" : "false", result_success ? "true" : "false",
-        result_code0, result_code1, failure);
+        result_code0, result_code1, failure, parsed_app_type, parsed_title_bytes);
     if (length <= 0 || (size_t)length >= sizeof(json) ||
         pwrite(output_fd, json, (size_t)length, 0) != length ||
         ftruncate(output_fd, length) != 0 || fsync(output_fd) != 0)
@@ -115,6 +125,11 @@ static int report(void) {
 static void perform_native(void) {
     Shared app = {0}, services = {0}, manager = {0}, request = {0};
     _Alignas(16) unsigned char result[0x30] = {0};
+#if NCUT_HIGHLEVEL_XML_REQUEST
+    _Alignas(16) unsigned char record[0x278] = {0};
+    int record_initialized = 0;
+    unsigned char *xml = NULL;
+#endif
     if (!context_available()) { failure = 14; goto release; }
     api.current_app(&app);
     if (!app.object || !app.control) { failure = 2; goto release; }
@@ -132,9 +147,10 @@ static void perform_native(void) {
     api.request(&request, NULL);
     if (!request.object || !request.control ||
         *(uintptr_t *)request.object != image_base +
-            (NCUT_HIGHLEVEL_FILE_REQUEST ? 0xa899f28 :
+            (NCUT_HIGHLEVEL_XML_REQUEST ? 0xa76fdd0 :
+             NCUT_HIGHLEVEL_FILE_REQUEST ? 0xa899f28 :
              NCUT_HIGHLEVEL_IMAGE_REQUEST ? 0xa899fc8 : 0xa899f78) ||
-        *(uint32_t *)((unsigned char *)request.object + 0x7c) != 1) {
+        *(uint32_t *)((unsigned char *)request.object + 0x7c) != (NCUT_HIGHLEVEL_XML_REQUEST ? 2 : 1)) {
         failure = 5; goto release;
     }
     const size_t recipient_size = (size_t)payload[0] | ((size_t)payload[1] << 8);
@@ -143,6 +159,66 @@ static void perform_native(void) {
         recipient_size + text_size + 4 != payload_size) {
         failure = 6; goto release;
     }
+#if NCUT_HIGHLEVEL_XML_REQUEST
+    /* Pinned app-message XML constructor. Reuse native SQL-record parser and
+     * move its owned AppMsgInfo into the factory-initialized core message. */
+    char xml_path[1025];
+    if (text_size > sizeof(xml_path)-1) { failure = 16; goto release; }
+    memcpy(xml_path, payload + 4 + recipient_size, text_size);
+    xml_path[text_size] = 0;
+    int xml_fd = open(xml_path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    struct stat xml_stat;
+    if (xml_fd < 0) { failure = 16; goto release; }
+    if (fstat(xml_fd, &xml_stat) || !S_ISREG(xml_stat.st_mode) ||
+        xml_stat.st_size <= 0 || xml_stat.st_size > 65536) {
+        close(xml_fd); failure = 16; goto release;
+    }
+    size_t xml_size = (size_t)xml_stat.st_size;
+    xml = malloc(xml_size + 1);
+    if (!xml) { close(xml_fd); failure = 16; goto release; }
+    size_t read_size = 0;
+    while (read_size < xml_size) {
+        ssize_t n = read(xml_fd, xml + read_size, xml_size - read_size);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        read_size += (size_t)n;
+    }
+    close(xml_fd);
+    if (read_size != xml_size || memchr(xml, 0, xml_size)) {
+        failure = 16; goto release;
+    }
+    xml[xml_size] = 0;
+    api.record_construct(record);
+    record_initialized = 1;
+    *(uint32_t *)(record + 0xc) = 49;
+    *(uint32_t *)(record + 0x10) = 5;
+    api.assign(record + 0x130, xml, xml_size);
+    api.record_parse(record);
+    Shared *info = (Shared *)(record + 0x220);
+    if (!info->object || !info->control ||
+        *(uintptr_t *)info->object != image_base + 0xa89de68) {
+        failure = 17; goto release;
+    }
+    parsed_app_type = *(uint32_t *)((unsigned char *)info->object + 0xc);
+    unsigned char *title = (unsigned char *)info->object + 0x1e0;
+    parsed_title_bytes = (title[0] & 1) ? *(size_t *)(title + 8) : title[0] >> 1;
+    if ((parsed_app_type != 5 && parsed_app_type != 33 && parsed_app_type != 36) || !parsed_title_bytes || parsed_title_bytes > 8192) {
+        failure = 18; goto release;
+    }
+    unsigned char *core = (unsigned char *)request.object + 0xe8;
+    Shared *core_info = (Shared *)(core + 0x218);
+    if (*(uintptr_t *)core != image_base + 0xa8981a0 ||
+        core_info->object || core_info->control) { failure = 19; goto release; }
+    *(uint32_t *)(core + 8) = 49;
+    *(uint32_t *)(core + 0xc) = parsed_app_type;
+    api.assign(core + 0xb8, xml, xml_size);
+    api.assign(core + 0x28, payload + 4, recipient_size);
+    api.assign(core + 0x58, payload + 4, recipient_size);
+    *core_info = *info;
+    *info = (Shared){0};
+    *(uint32_t *)((unsigned char *)request.object + 0x7c) = 4;
+    api.assign((unsigned char *)request.object + 0x90, payload + 4, recipient_size);
+#else
     *(uint32_t *)((unsigned char *)request.object + 0xe4) =
         NCUT_HIGHLEVEL_FILE_REQUEST ? 49 : NCUT_HIGHLEVEL_IMAGE_REQUEST ? 3 : 1;
 #if NCUT_HIGHLEVEL_FILE_REQUEST
@@ -171,6 +247,7 @@ static void perform_native(void) {
     api.assign((unsigned char *)request.object +
                ((NCUT_HIGHLEVEL_IMAGE_REQUEST || NCUT_HIGHLEVEL_FILE_REQUEST) ? 0xf0 : 0x5c8),
                payload + 4 + recipient_size, text_size);
+#endif
     request_constructed = 1;
     report();
 
@@ -186,6 +263,10 @@ static void perform_native(void) {
         api.result_destroy(result);
     }
 release:
+#if NCUT_HIGHLEVEL_XML_REQUEST
+    if (record_initialized) api.record_destroy(record);
+    if (xml) { memset(xml, 0, (size_t)xml_stat.st_size); free(xml); }
+#endif
     if (request.control) api.shared_destroy(&request);
     if (manager.control) api.shared_destroy(&manager);
     if (services.control) api.shared_destroy(&services);
@@ -218,12 +299,18 @@ static int initialize(uintptr_t base, const void *data, size_t length,
         .services = (void *)(base + 0x6198050),
         .manager = (void *)(base + 0x61a8af0),
         .request = (void *)(base +
-            (NCUT_HIGHLEVEL_FILE_REQUEST ? 0x5322e80 :
+            (NCUT_HIGHLEVEL_XML_REQUEST ? 0x4c82830 :
+             NCUT_HIGHLEVEL_FILE_REQUEST ? 0x5322e80 :
              NCUT_HIGHLEVEL_IMAGE_REQUEST ? 0x4a01cf0 : 0x4a01e80)),
         .assign = (void *)(base + 0x450cf10),
         .send = (void *)(base + 0x64c7b40),
         .result_destroy = (void *)(base + 0x64c8940),
         .shared_destroy = (void *)(base + 0x4708170)
+#if NCUT_HIGHLEVEL_XML_REQUEST
+        , .record_construct = (void *)(base + 0x5cd6fa0)
+        , .record_parse = (void *)(base + 0x6059560)
+        , .record_destroy = (void *)(base + 0x5cd7380)
+#endif
     };
     output_fd = open(result_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (output_fd < 0) return errno;
