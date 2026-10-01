@@ -101,6 +101,60 @@ class ImageTests(unittest.TestCase):
         self.assertEqual(result['local_history_type_matches'], 1)
         self.assertEqual(result['server_message_id'], '42')
 
+    def test_file_snapshot_preserves_filename_including_reserved_state_names(self):
+        original = self.root/'request.json'
+        original.write_bytes(b'file payload without an image header')
+        request = {**self.request, 'operation': 'send_file', 'file': str(original)}
+        path = Path(backend.stage_media(request, 'file'))
+        self.assertEqual(path.name, original.name)
+        self.assertEqual(path.read_bytes(), original.read_bytes())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads((path.parent.parent/'request.json').read_text())['request_kind'], 'file')
+        renamed = self.root/'renamed.json'
+        renamed.write_bytes(original.read_bytes())
+        with self.assertRaisesRegex(ValueError, 'REQUEST_ID_CONFLICT'):
+            backend.stage_media({**request, 'file': str(renamed)}, 'file')
+
+    def test_file_replay_binds_bytes_and_filename_without_native_calls(self):
+        request = {**self.request, 'operation': 'send_file'}
+        work = backend.work_for(request['request_id'])
+        work.mkdir(parents=True)
+        _data, name, sha = media.read_file(request['file'])
+        (work/'request.json').write_text(json.dumps({'send': True,
+            'recipient': request['recipient'], 'request_kind': 'file',
+            'payload_sha256': media.file_fingerprint(request['recipient'], name, sha)}))
+        (work/'result.json').write_text(json.dumps(queued_result()))
+        with patch.object(backend.highlevel, 'client_identity') as identity, \
+                patch.object(backend.highlevel, 'trial') as trial:
+            self.assertTrue(backend.send_file(request)['replayed'])
+            self.assertEqual(backend.send_image(self.request)['code'], 'REQUEST_ID_CONFLICT')
+            changed = self.root/'renamed.png'
+            changed.write_bytes(self.image.read_bytes())
+            self.assertEqual(backend.send_file({**request, 'file': str(changed)})['code'],
+                             'REQUEST_ID_CONFLICT')
+        identity.assert_not_called()
+        trial.assert_not_called()
+
+    def test_file_preflight_and_send_share_snapshot_name_bytes_and_kind(self):
+        request = {**self.request, 'operation': 'send_file'}
+        original = self.image.read_bytes()
+        seen = []
+        def trial(send, path, request_id, recipient, **options):
+            seen.append((send, Path(path).name, Path(path).read_bytes(), options))
+            if not send:
+                self.image.write_bytes(b'changed original')
+                return {'highlevel_preflight_verified': True}
+            return queued_result()
+        with patch.object(backend.highlevel, 'client_identity', return_value=(10, 99)), \
+                patch.object(backend.highlevel, 'trial', side_effect=trial), \
+                patch.object(backend, 'history_snapshot', return_value=None), \
+                patch.object(backend.highlevel.base, 'save'):
+            result = backend.send_file(request)
+        self.assertTrue(result['ok'])
+        self.assertEqual([(s[1], s[2]) for s in seen], [(self.image.name, original)] * 2)
+        self.assertTrue(all(s[3]['request_kind'] == 'file' for s in seen))
+        self.assertFalse(result['recipient_delivery_verified'])
+
 
 if __name__ == '__main__':
     unittest.main()

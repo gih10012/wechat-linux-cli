@@ -115,12 +115,13 @@ class HighLevelCandidateTests(unittest.TestCase):
                     native_highlevel_candidate.payload_for(recipient, text)
 
     def test_native_lifecycle_preflight_send_and_manager_rejection(self):
-        for image in (False, True):
-          with self.subTest(image=image), tempfile.TemporaryDirectory() as temp:
+        for kind in ('text', 'image', 'file'):
+          with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
             binary = Path(temp)/'fixture'
             compiler = subprocess.run(['/usr/bin/gcc', '-O2', '-std=c11', '-Wall', '-Wextra',
                                        '-Werror', '-pthread',
-                                       *(['-DNCUT_HIGHLEVEL_IMAGE_REQUEST=1'] if image else []),
+                                       *(['-DNCUT_HIGHLEVEL_' + kind.upper() + '_REQUEST=1']
+                                         if kind != 'text' else []),
                                        str(ROOT/'tests/native_highlevel_fixture.c'),
                                        '-o', str(binary)], capture_output=True, text=True,
                                       timeout=30)
@@ -175,6 +176,30 @@ class HighLevelCandidateTests(unittest.TestCase):
                     expected_pid=10, expected_start_time=99)
             prepare.assert_not_called()
             self.assertEqual(list(Path(temp).iterdir()), [])
+
+    def test_file_snapshot_remains_readable_after_trial_cleanup(self):
+        # The uploader can open the file only after the synchronous local
+        # insertion has returned and trial cleanup has run.
+        for failed in (False, True):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as temp:
+                source = Path(temp)/'文件验收.txt'
+                source.write_bytes(b'async upload fixture')
+                with patch.dict(os.environ, {'WECHAT_LINUX_RUNTIME_DIR': temp}), \
+                     patch.object(native_highlevel_candidate.base, 'has_ptrace_capability', return_value=True), \
+                     patch.object(native_highlevel_candidate, 'client_identity', return_value=(10, 99)), \
+                     patch.object(native_highlevel_candidate.base, 'process_running_untraced', return_value=True), \
+                     patch.object(native_highlevel_candidate, 'run_desktop_preparation', return_value={}), \
+                     patch.object(native_highlevel_candidate.base, 'compile_helper', return_value=Path(temp)/'helper.so'), \
+                     patch.object(native_highlevel_candidate.base, 'run_injection',
+                                  side_effect=OSError('fixture failure') if failed else None,
+                                  return_value={'status': 'trial_finished'}):
+                    native_highlevel_candidate.trial(False, str(source), 'file-permission-test',
+                        expected_pid=10, expected_start_time=99, allow_live=True,
+                        request_kind='file', allow_media_trial=True)
+                    snapshot = native_highlevel_candidate.work_for('file-permission-test', False)/'input'/source.name
+                    self.assertTrue(os.access(snapshot.parent, os.X_OK))
+                    self.assertEqual(snapshot.parent.stat().st_mode & 0o777, 0o700)
+                    self.assertEqual(snapshot.read_bytes(), source.read_bytes())
 
     def test_same_preflight_id_replays_record_without_a_new_native_call(self):
         request_id = 'test-replay-highlevel-1'

@@ -16,6 +16,15 @@ def image_path(value):
 
 def read_image(value):
     path = image_path(value)
+    data = read_regular(path)
+    suffix = ('.png' if data.startswith(b'\x89PNG\r\n\x1a\n') else
+              '.jpg' if data.startswith(b'\xff\xd8\xff') else None)
+    if suffix is None:
+        raise ValueError('IMAGE_FORMAT_UNSUPPORTED: only PNG and JPEG bytes are accepted')
+    return data, suffix, hashlib.sha256(data).hexdigest()
+
+
+def read_regular(path):
     # NONBLOCK lets us reject a FIFO without waiting for its writer. Inspect
     # the opened descriptor rather than a separate, racy path stat.
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -26,11 +35,21 @@ def read_image(value):
         data = stream.read(MAX_IMAGE_BYTES + 1)
     if not data or len(data) > MAX_IMAGE_BYTES:
         raise ValueError('IMAGE_FILE_INVALID: image changed size beyond the input bound')
-    suffix = ('.png' if data.startswith(b'\x89PNG\r\n\x1a\n') else
-              '.jpg' if data.startswith(b'\xff\xd8\xff') else None)
-    if suffix is None:
-        raise ValueError('IMAGE_FORMAT_UNSUPPORTED: only PNG and JPEG bytes are accepted')
-    return data, suffix, hashlib.sha256(data).hexdigest()
+    return data
+
+
+def read_file(value):
+    path = image_path(value)
+    filename = path.name
+    if len(filename.encode()) > 255 or filename in ('', '.', '..'):
+        raise ValueError('FILE_NAME_INVALID: expected a filename of at most 255 UTF-8 bytes')
+    data = read_regular(path)
+    return data, filename, hashlib.sha256(data).hexdigest()
+
+
+def file_fingerprint(recipient, filename, sha256):
+    return hashlib.sha256(b'file\0' + recipient.encode() + b'\0' + filename.encode()
+                          + b'\0' + bytes.fromhex(sha256)).hexdigest()
 
 
 def image_fingerprint(recipient, sha256):

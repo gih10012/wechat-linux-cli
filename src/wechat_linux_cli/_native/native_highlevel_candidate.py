@@ -60,6 +60,7 @@ def inspect_trial(request_id, send=True):
         if proof.get('request_id') == request_id:
             for key in ('local_history_integrated', 'local_history_exact_matches',
                         'local_history_type_matches', 'local_history_source',
+                        'local_history_filename_matches',
                         'local_message_id', 'server_message_id', 'recipient_delivery_verified',
                         'linux_ui_verified', 'replay_verified'):
                 if key in proof:
@@ -97,7 +98,7 @@ def client_identity():
 
 
 def require_preflight(root, request_id, pid, start_time, *, request_kind='text', media_sha256=None,
-                      recipient=None):
+                      recipient=None, media_filename=None):
     if not isinstance(request_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{3,79}', request_id):
         raise ValueError('VERIFIED_PREFLIGHT_REQUIRED: a preflight request ID is required')
     work = root/('preflight-' + hashlib.sha256(request_id.encode()).hexdigest()[:24])
@@ -112,6 +113,7 @@ def require_preflight(root, request_id, pid, start_time, *, request_kind='text',
             and config.get('send') is False and config.get('launch_symbol') == 'ncut_highlevel_enqueue'
             and config.get('request_kind', 'text') == request_kind
             and (request_kind == 'text' or config.get('media_sha256') == media_sha256)
+            and (request_kind != 'file' or config.get('media_filename') == media_filename)
             and media_target_matches
             and worker.get('worker_done') and worker.get('manager_verified')
             and worker.get('request_constructed') and not worker.get('failure')
@@ -123,10 +125,10 @@ def require_preflight(root, request_id, pid, start_time, *, request_kind='text',
 def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
           expected_pid=None, expected_start_time=None, preflight_request_id=None,
           allow_live=False, request_kind='text', allow_media_trial=False):
-    if request_kind not in ('text', 'image'):
+    if request_kind not in ('text', 'image', 'file'):
         raise ValueError('Unsupported queued request kind')
     if request_kind != 'text' and not allow_media_trial:
-        raise ValueError('MEDIA_TRIAL_DISABLED: image requests require a reviewed one-shot trial')
+        raise ValueError('MEDIA_TRIAL_DISABLED: media requests require explicit reviewed enablement')
     payload = payload_for(recipient, text)
     work = work_for(request_id, send)
     uid = int(os.environ.get('SUDO_UID', '0')) if os.geteuid() == 0 else os.getuid()
@@ -136,12 +138,17 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
     media_bytes = None
     media_sha256 = None
     media_suffix = None
+    media_filename = None
     if request_kind == 'image':
         # Read as the desktop owner, even for a root-run trial. Only regular,
         # bounded PNG/JPEG inputs enter the experiment; snapshot before attach.
         with desktop_identity(uid, owner.pw_gid):
             media_bytes, media_suffix, media_sha256 = media.read_image(text)
         fingerprint = media.image_fingerprint(recipient, media_sha256)
+    elif request_kind == 'file':
+        with desktop_identity(uid, owner.pw_gid):
+            media_bytes, media_filename, media_sha256 = media.read_file(text)
+        fingerprint = media.file_fingerprint(recipient, media_filename, media_sha256)
     if work.exists():
         previous = json.loads((work/'request.json').read_text())
         if previous.get('payload_sha256') != fingerprint or previous.get('send') != send:
@@ -159,7 +166,8 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
         raise ValueError('Observed client PID and start time are required')
     if send:
         require_preflight(work_root, preflight_request_id, expected_pid, expected_start_time,
-                          request_kind=request_kind, media_sha256=media_sha256, recipient=recipient)
+                          request_kind=request_kind, media_sha256=media_sha256, recipient=recipient,
+                          media_filename=media_filename)
     if uid == 0 or (os.geteuid() != 0 and not base.has_ptrace_capability()):
         raise ValueError('PRIVILEGE_REQUIRED: owner-scoped ptrace capability is required')
     pid, start = client_identity()
@@ -174,9 +182,14 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
         work.mkdir(mode=0o700)
         base.save(work/'request.json', {'request_id': request_id, 'recipient': recipient,
                                         'send': send, 'payload_sha256': fingerprint,
-                                        'request_kind': request_kind, 'media_sha256': media_sha256})
+                                        'request_kind': request_kind, 'media_sha256': media_sha256,
+                                        'media_filename': media_filename})
         if media_bytes is not None:
-            snapshot_path = work/('input' + media_suffix)
+            if request_kind == 'file':
+                (work/'input').mkdir(mode=0o700)
+                snapshot_path = work/'input'/media_filename
+            else:
+                snapshot_path = work/('input' + media_suffix)
             with snapshot_path.open('xb') as file:
                 file.write(media_bytes)
             snapshot_path.chmod(0o600)
@@ -189,7 +202,8 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
         helper = base.compile_helper(work, uid, owner.pw_gid,
                                      source=Path(__file__).with_name('native_highlevel_helper.c'),
                                      highlevel_dispatch=True, highlevel_send=send,
-                                     highlevel_image=request_kind == 'image')
+                                     highlevel_image=request_kind == 'image',
+                                     highlevel_file=request_kind == 'file')
         config = {**prepared, 'pid': pid, 'start_time': start, 'uid': uid, 'gid': owner.pw_gid,
                   'binary_copy': str(work/'wechat.elf'), 'helper': str(helper),
                   'injection_result': str(work/'injection.json'),
@@ -197,7 +211,8 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
                   'send': send, 'launch_symbol': 'ncut_highlevel_enqueue',
                   'sync_call': False, 'dispatch_call': True, 'highlevel_send_trial': send,
                   'preflight_request_id': preflight_request_id,
-                  'request_kind': request_kind, 'media_sha256': media_sha256}
+                  'request_kind': request_kind, 'media_sha256': media_sha256,
+                  'media_filename': media_filename}
         stage = 'run_injection'
         result = base.run_injection(config, work)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
@@ -221,7 +236,9 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
                 base.save(work/'config.json', config)
         for artifact in work.iterdir():
             try:
-                artifact.chmod(0o600)
+                # The client can upload after local insertion returns. Keep
+                # snapshot directories traversable for that asynchronous read.
+                artifact.chmod(0o700 if artifact.is_dir() else 0o600)
                 os.chown(artifact, uid, owner.pw_gid)
             except FileNotFoundError:
                 pass

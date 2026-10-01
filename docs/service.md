@@ -47,6 +47,7 @@ wechat-linux service-status
 wechat-linux inspect-pending
 wechat-linux send-text --recipient filehelper --text '消息文字' --request-id '本次唯一ID'
 wechat-linux send-image --recipient filehelper --file /绝对路径/image.png --request-id '图片唯一ID'
+wechat-linux send-file --recipient filehelper --file /绝对路径/文件.zip --request-id '文件唯一ID'
 wechat-linux send-status --request-id '原ID'
 systemctl status "wechat-linux-cli@$(id -u).service"
 journalctl -u "wechat-linux-cli@$(id -u).service" -n 50 --no-pager
@@ -86,3 +87,5 @@ unit 显式设置桌面用户的 `HOME` 和受限 `PATH`，不继承普通终端
 2026-09-30 真实部署时已核对代码/解释器/命令/unit 为 root 所有，控制目录/socket 为桌面用户且权限分别 0700/0600，服务以桌面 UID 仅带 CAP_SYS_PTRACE 运行。普通用户命令从仓库外实际读写成功。发送结束且任务归零后的一次空闲采样约 12 MiB、1 个任务；这是单次采样，不是长期资源上限。离线包更新曾通过等待服务安全结束、替换已校验包、重启及健康检查，保留旧包和私有防重状态；当前公共安装器仍是首次安装入口。
 
 图片输入为绝对路径、1 字节到 10 MiB 的常规 PNG/JPEG 文件，服务以桌面用户权限读取，不接收任意 shell 命令。FIFO 和其他特殊文件在打开后检查拒绝，不阻塞等待读取。`native-highlevel/media-inputs/` 保留每个图片请求的私有快照与内容身份；预检和提交均使用快照，原文件中途变化不会替换发送内容。快照包含图片正文，不发布到仓库；保留请求及防重记录后才可另行规划清理。默认图片读回的类型候选不证明图片内容，`local_history_integrated` 保持 null，只有独立验收才能另写确认。
+
+2026-10-01 普通 CLI 中文文件名 TXT 与 ZIP→ClawBot 已独立验收：各单次入站，下载文件名/字节一致，ZIP解压完整，Linux文件卡片完成，本地各一条记录且有服务器ID。同ID重放未重新提交，改名或改文字动作拒绝。文件快照保留原名称，预检与提交还匹配文件名；原生文件使用客户端 app subtype 6 的上传与入库流程。快照目录保持700、文件600，异步上传完成前不能删除或撤销目录执行权限。空文件、超过10 MiB、其他收件人与原生表情包/卡片待分别验收。

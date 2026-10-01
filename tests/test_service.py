@@ -62,6 +62,15 @@ class UnixServiceTests(unittest.TestCase):
             self.assertFalse(client.call(changed, self.path)['ok'])
         self.assertEqual(self.calls, [request])
 
+    def test_file_socket_accepts_exact_group_target_and_literal_unicode_path(self):
+        request = {'operation': 'send_file', 'request_id': 'socket-file-01',
+                   'recipient': 'fixture@chatroom', 'file': '/owner/文件 $(literal).zip'}
+        self.assertTrue(client.call(request, self.path)['ok'])
+        self.assertEqual(self.calls, [request])
+        for changed in ({**request, 'file': 'relative.png'}, {**request, 'text': 'extra'}):
+            self.assertFalse(client.call(changed, self.path)['ok'])
+        self.assertEqual(self.calls, [request])
+
     def test_conflicting_listener_is_rejected_without_unlinking_live_socket(self):
         with self.assertRaises(BlockingIOError):
             service.Service(self.path, lambda _: None)

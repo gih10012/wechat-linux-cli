@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <asm/prctl.h>
 #include <sys/syscall.h>
+#include <sys/stat.h>
 
 #ifndef NCUT_ALLOW_HIGHLEVEL_SEND
 #define NCUT_ALLOW_HIGHLEVEL_SEND 0
@@ -28,6 +29,12 @@
 #endif
 #ifndef NCUT_HIGHLEVEL_IMAGE_REQUEST
 #define NCUT_HIGHLEVEL_IMAGE_REQUEST 0
+#endif
+#ifndef NCUT_HIGHLEVEL_FILE_REQUEST
+#define NCUT_HIGHLEVEL_FILE_REQUEST 0
+#endif
+#if NCUT_HIGHLEVEL_IMAGE_REQUEST && NCUT_HIGHLEVEL_FILE_REQUEST
+#error Image and file request builds are distinct
 #endif
 
 typedef struct { void *object; void *control; } Shared;
@@ -125,7 +132,8 @@ static void perform_native(void) {
     api.request(&request, NULL);
     if (!request.object || !request.control ||
         *(uintptr_t *)request.object != image_base +
-            (NCUT_HIGHLEVEL_IMAGE_REQUEST ? 0xa899fc8 : 0xa899f78) ||
+            (NCUT_HIGHLEVEL_FILE_REQUEST ? 0xa899f28 :
+             NCUT_HIGHLEVEL_IMAGE_REQUEST ? 0xa899fc8 : 0xa899f78) ||
         *(uint32_t *)((unsigned char *)request.object + 0x7c) != 1) {
         failure = 5; goto release;
     }
@@ -136,15 +144,32 @@ static void perform_native(void) {
         failure = 6; goto release;
     }
     *(uint32_t *)((unsigned char *)request.object + 0xe4) =
-        NCUT_HIGHLEVEL_IMAGE_REQUEST ? 3 : 1;
+        NCUT_HIGHLEVEL_FILE_REQUEST ? 49 : NCUT_HIGHLEVEL_IMAGE_REQUEST ? 3 : 1;
+#if NCUT_HIGHLEVEL_FILE_REQUEST
+    /* Normal UI file requests use the base source, app subtype 6, native
+     * path +f0, display filename +158 and file byte count +170. */
+    char file_path[1025];
+    if (text_size > sizeof(file_path)-1) { failure = 15; goto release; }
+    memcpy(file_path, payload + 4 + recipient_size, text_size);
+    file_path[text_size] = 0;
+    const char *filename = strrchr(file_path, '/');
+    struct stat file_info;
+    if (!filename || !filename[1] || stat(file_path, &file_info) ||
+        !S_ISREG(file_info.st_mode) || file_info.st_size <= 0 ||
+        file_info.st_size > 10 * 1024 * 1024) { failure = 15; goto release; }
+    ++filename;
+    *(uint32_t *)((unsigned char *)request.object + 0xe8) = 6;
+    *(uint64_t *)((unsigned char *)request.object + 0x170) = (uint64_t)file_info.st_size;
+    api.assign((unsigned char *)request.object + 0x158, filename, strlen(filename));
+#endif
     api.assign((unsigned char *)request.object + 0x90, payload + 4, recipient_size);
     /* The observed image source uses its native path at common-base +0xf0.
      * That path owns the same 24-byte libc++ string storage as assign(),
      * and the common base destructor releases it. Its media fields remain
      * constructor initialized; the client pipeline prepares/uploads the file.
-     * This is a separately compiled trial, unavailable to the text service. */
+     * Each format uses a separately compiled, reviewed queued helper. */
     api.assign((unsigned char *)request.object +
-               (NCUT_HIGHLEVEL_IMAGE_REQUEST ? 0xf0 : 0x5c8),
+               ((NCUT_HIGHLEVEL_IMAGE_REQUEST || NCUT_HIGHLEVEL_FILE_REQUEST) ? 0xf0 : 0x5c8),
                payload + 4 + recipient_size, text_size);
     request_constructed = 1;
     report();
@@ -193,7 +218,8 @@ static int initialize(uintptr_t base, const void *data, size_t length,
         .services = (void *)(base + 0x6198050),
         .manager = (void *)(base + 0x61a8af0),
         .request = (void *)(base +
-            (NCUT_HIGHLEVEL_IMAGE_REQUEST ? 0x4a01cf0 : 0x4a01e80)),
+            (NCUT_HIGHLEVEL_FILE_REQUEST ? 0x5322e80 :
+             NCUT_HIGHLEVEL_IMAGE_REQUEST ? 0x4a01cf0 : 0x4a01e80)),
         .assign = (void *)(base + 0x450cf10),
         .send = (void *)(base + 0x64c7b40),
         .result_destroy = (void *)(base + 0x64c8940),

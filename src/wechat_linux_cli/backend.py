@@ -82,13 +82,17 @@ def replay(request):
         return None
     work = current if current.exists() else old
     recorded = json.loads((work/'request.json').read_text())
-    kind = 'image' if request['operation'] == 'send_image' else 'text'
+    kind = {'send_image': 'image', 'send_file': 'file'}.get(request['operation'], 'text')
     if recorded.get('request_kind', 'text') != kind:
         matches = False
     elif kind == 'image':
         _data, _suffix, sha256 = media.read_image(request['file'])
         matches = (work == current and recorded.get('payload_sha256') ==
                    media.image_fingerprint(request['recipient'], sha256))
+    elif kind == 'file':
+        _data, filename, sha256 = media.read_file(request['file'])
+        matches = (work == current and recorded.get('payload_sha256') ==
+                   media.file_fingerprint(request['recipient'], filename, sha256))
     elif work == current:
         fingerprint = hashlib.sha256(highlevel.payload_for(request['recipient'], request['text'])).hexdigest()
         matches = recorded.get('payload_sha256') == fingerprint
@@ -164,25 +168,32 @@ def send_text(request):
     return result
 
 
-def stage_image(request):
+def stage_media(request, kind):
     """Reserve a content identity and snapshot once for construction and send."""
     from .service import private_dir, read_private, save
-    data, suffix, sha256 = media.read_image(request['file'])
+    if kind == 'image':
+        data, suffix, sha256 = media.read_image(request['file'])
+        filename = 'input' + suffix
+    else:
+        data, filename, sha256 = media.read_file(request['file'])
+        suffix = None
     root = highlevel.runtime_root(Path.home())
     private_dir(root)
     private_dir(root/'media-inputs')
     directory = root/'media-inputs'/hashlib.sha256(request['request_id'].encode()).hexdigest()[:24]
     private_dir(directory)
     manifest = directory/'request.json'
-    expected = {'request_id': request['request_id'], 'request_kind': 'image',
-                'recipient': request['recipient'], 'media_sha256': sha256, 'suffix': suffix}
-    path = directory/('input' + suffix)
+    expected = {'request_id': request['request_id'], 'request_kind': kind,
+                'recipient': request['recipient'], 'media_sha256': sha256,
+                'suffix': suffix, 'filename': filename}
+    private_dir(directory/'input')
+    path = directory/'input'/filename
     if manifest.exists():
         if read_private(manifest) != expected:
-            raise ValueError('REQUEST_ID_CONFLICT: image request was already reserved')
+            raise ValueError('REQUEST_ID_CONFLICT: media request was already reserved')
         # An interrupted snapshot is an inspection case, never a fresh send.
-        if path.is_symlink() or media.read_image(str(path))[2] != sha256:
-            raise ValueError('REQUEST_PENDING: reserved image snapshot is unavailable or changed')
+        if path.is_symlink() or hashlib.sha256(media.read_regular(path)).hexdigest() != sha256:
+            raise ValueError('REQUEST_PENDING: reserved media snapshot is unavailable or changed')
     else:
         save(manifest, expected)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -191,6 +202,10 @@ def stage_image(request):
             stream.flush()
             os.fsync(stream.fileno())
     return str(path)
+
+
+def stage_image(request):
+    return stage_media(request, 'image')
 
 
 def image_history_evidence(before, after):
@@ -207,16 +222,16 @@ def image_history_evidence(before, after):
     return proof
 
 
-def send_image(request):
+def send_media(request, kind):
     previous = replay(request)
     if previous is not None:
         return previous
     highlevel.payload_for(request['recipient'], request['file'])
-    path = stage_image(request)
+    path = stage_media(request, kind)
     pid, start = highlevel.client_identity()
     proof_id = preflight_id(request['request_id'])
     options = {'expected_pid': pid, 'expected_start_time': start, 'allow_live': True,
-               'request_kind': 'image', 'allow_media_trial': True}
+               'request_kind': kind, 'allow_media_trial': True}
     proof = highlevel.trial(False, path, proof_id, request['recipient'], **options)
     if not proof.get('highlevel_preflight_verified'):
         return {**proof, 'ok': False, 'phase': 'preflight',
@@ -227,12 +242,35 @@ def send_image(request):
                             preflight_request_id=proof_id, **options)
     result['ok'] = completed(result)
     if result['ok']:
-        evidence = image_history_evidence(before, history_snapshot(request['recipient']))
+        after = history_snapshot(request['recipient'])
+        evidence = (image_history_evidence(before, after) if kind == 'image' else
+                    file_history_evidence(before, after, Path(path).name))
         result.update(evidence, recipient_delivery_verified=False)
         highlevel.base.save(work_for(request['request_id'])/'acceptance.json',
                             {'request_id': request['request_id'], **evidence,
                              'recipient_delivery_verified': False, 'verified_at': time.time()})
     return result
+
+
+def file_history_evidence(before, after, filename):
+    if before is None or after is None:
+        return {'local_history_integrated': None}
+    ids = {(r['database'], r['local_id']) for r in before}
+    matches = [r for r in after if (r['database'], r['local_id']) not in ids
+               and r.get('type') == 49 and r.get('text') == filename and not r.get('truncated')]
+    proof = {'local_history_integrated': None, 'local_history_filename_matches': len(matches),
+             'local_history_source': 'local_client_database'}
+    if len(matches) == 1:
+        proof.update(local_message_id=matches[0]['local_id'], server_message_id=matches[0]['server_id'])
+    return proof
+
+
+def send_image(request):
+    return send_media(request, 'image')
+
+
+def send_file(request):
+    return send_media(request, 'file')
 
 
 def main():
@@ -242,6 +280,8 @@ def main():
             result = send_text(request)
         elif request['operation'] == 'send_image':
             result = send_image(request)
+        elif request['operation'] == 'send_file':
+            result = send_file(request)
         else:
             raise ValueError('Unsupported operation')
     except (ValueError, OSError) as error:
