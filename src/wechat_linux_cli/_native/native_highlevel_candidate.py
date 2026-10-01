@@ -127,7 +127,7 @@ def require_preflight(root, request_id, pid, start_time, *, request_kind='text',
 def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
           expected_pid=None, expected_start_time=None, preflight_request_id=None,
           allow_live=False, request_kind='text', allow_media_trial=False, source_identity=None):
-    if request_kind not in ('text', 'image', 'file', 'xml'):
+    if request_kind not in ('text', 'image', 'file', 'xml', 'sticker'):
         raise ValueError('Unsupported queued request kind')
     if source_identity is not None and request_kind != 'xml':
         raise ValueError('Forward source identity only applies to XML requests')
@@ -148,12 +148,14 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
             media_bytes, _metadata, media_sha256 = cards.read_xml(text)
         media_suffix = '.xml'
         fingerprint = cards.fingerprint(recipient, media_sha256, source_identity)
-    elif request_kind == 'image':
+    elif request_kind in ('image', 'sticker'):
         # Read as the desktop owner, even for a root-run trial. Only regular,
         # bounded PNG/JPEG inputs enter the experiment; snapshot before attach.
         with desktop_identity(uid, owner.pw_gid):
-            media_bytes, media_suffix, media_sha256 = media.read_image(text)
-        fingerprint = media.image_fingerprint(recipient, media_sha256)
+            reader = media.read_sticker if request_kind == 'sticker' else media.read_image
+            media_bytes, media_suffix, media_sha256 = reader(text)
+        fingerprinter = media.sticker_fingerprint if request_kind == 'sticker' else media.image_fingerprint
+        fingerprint = fingerprinter(recipient, media_sha256)
     elif request_kind == 'file':
         with desktop_identity(uid, owner.pw_gid):
             media_bytes, media_filename, media_sha256 = media.read_file(text)
@@ -214,7 +216,8 @@ def trial(send, text, request_id, recipient='filehelper', *, event_tid=None,
                                      highlevel_dispatch=True, highlevel_send=send,
                                      highlevel_image=request_kind == 'image',
                                      highlevel_file=request_kind == 'file',
-                                     highlevel_xml=request_kind == 'xml')
+                                     highlevel_xml=request_kind == 'xml',
+                                     highlevel_sticker=request_kind == 'sticker')
         config = {**prepared, 'pid': pid, 'start_time': start, 'uid': uid, 'gid': owner.pw_gid,
                   'binary_copy': str(work/'wechat.elf'), 'helper': str(helper),
                   'injection_result': str(work/'injection.json'),

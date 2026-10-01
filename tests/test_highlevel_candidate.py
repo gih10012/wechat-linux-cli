@@ -115,7 +115,7 @@ class HighLevelCandidateTests(unittest.TestCase):
                     native_highlevel_candidate.payload_for(recipient, text)
 
     def test_native_lifecycle_preflight_send_and_manager_rejection(self):
-        for kind in ('text', 'image', 'file'):
+        for kind in ('text', 'image', 'file', 'sticker'):
           with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
             binary = Path(temp)/'fixture'
             compiler = subprocess.run(['/usr/bin/gcc', '-O2', '-std=c11', '-Wall', '-Wextra',

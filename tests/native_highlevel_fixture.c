@@ -12,7 +12,7 @@ static int missing_context;
 static int fake_context_available(void) { return !missing_context && (!require_context || active_context); }
 static void *observed_dispatcher;
 static int dispatcher_release_checks;
-#if NCUT_HIGHLEVEL_FILE_REQUEST
+#if NCUT_HIGHLEVEL_FILE_REQUEST || NCUT_HIGHLEVEL_STICKER_REQUEST
 static char fixture_file[] = "/tmp/wechat-native-file-XXXXXX";
 #endif
 static const char *fixture_value = "HELLO";
@@ -42,7 +42,7 @@ static void fake_request(Shared *out, void *unused) {
     if (unused) abort();
     ++requests;
     memset(request_object, 0, sizeof(request_object));
-    *(uintptr_t *)request_object = NCUT_HIGHLEVEL_FILE_REQUEST ? 0xa899f28 :
+    *(uintptr_t *)request_object = NCUT_HIGHLEVEL_STICKER_REQUEST ? 0xa89a068 : NCUT_HIGHLEVEL_FILE_REQUEST ? 0xa899f28 :
                                   NCUT_HIGHLEVEL_IMAGE_REQUEST ? 0xa899fc8 : 0xa899f78;
     *(uint32_t *)(request_object + 0x7c) = 1;
     out->object = request_object; out->control = request_object;
@@ -50,7 +50,7 @@ static void fake_request(Shared *out, void *unused) {
 static void fake_assign(void *dest, const void *bytes, size_t length) {
     if (dest == request_object + 0x90 && length == 10 &&
         !memcmp(bytes, "filehelper", length)) ++recipient_assigns;
-    else if (dest == request_object + ((NCUT_HIGHLEVEL_IMAGE_REQUEST || NCUT_HIGHLEVEL_FILE_REQUEST) ? 0xf0 : 0x5c8) &&
+    else if (dest == request_object + ((NCUT_HIGHLEVEL_IMAGE_REQUEST || NCUT_HIGHLEVEL_FILE_REQUEST || NCUT_HIGHLEVEL_STICKER_REQUEST) ? 0xf0 : 0x5c8) &&
              length == strlen(fixture_value) && !memcmp(bytes, fixture_value, length)) ++text_assigns;
 #if NCUT_HIGHLEVEL_FILE_REQUEST
     else if (dest == request_object + 0x158 &&
@@ -62,7 +62,11 @@ static void fake_assign(void *dest, const void *bytes, size_t length) {
 static void fake_send(void *out, void *manager, const Shared *request) {
     if (manager != manager_object || request->object != request_object ||
         *(uint32_t *)(request_object + 0xe4) !=
-            (NCUT_HIGHLEVEL_FILE_REQUEST ? 49 : NCUT_HIGHLEVEL_IMAGE_REQUEST ? 3 : 1)) abort();
+            (NCUT_HIGHLEVEL_STICKER_REQUEST ? 47 : NCUT_HIGHLEVEL_FILE_REQUEST ? 49 : NCUT_HIGHLEVEL_IMAGE_REQUEST ? 3 : 1)) abort();
+#if NCUT_HIGHLEVEL_STICKER_REQUEST
+    if (*(void **)(request_object + 0x5c8) || *(void **)(request_object + 0x5d0) ||
+        *(void **)(request_object + 0x5d8) || *(void **)(request_object + 0x5e0)) abort();
+#endif
 #if NCUT_HIGHLEVEL_FILE_REQUEST
     if (*(uint32_t *)(request_object + 0xe8) != 6 ||
         *(uint64_t *)(request_object + 0x170) != 5) abort();
@@ -209,7 +213,7 @@ static void run_dispatch_case(int cancel, int bad_output, int missing_scheduler)
 }
 
 int main(void) {
-#if NCUT_HIGHLEVEL_FILE_REQUEST
+#if NCUT_HIGHLEVEL_FILE_REQUEST || NCUT_HIGHLEVEL_STICKER_REQUEST
     int file_fd = mkstemp(fixture_file);
     if (file_fd < 0 || write(file_fd, "HELLO", 5) != 5 || close(file_fd)) abort();
     fixture_value = fixture_file;
@@ -250,7 +254,7 @@ int main(void) {
     synchronous = 1;
     run_dispatch_case(0, 0, 0);
     puts("highlevel fixture passed");
-#if NCUT_HIGHLEVEL_FILE_REQUEST
+#if NCUT_HIGHLEVEL_FILE_REQUEST || NCUT_HIGHLEVEL_STICKER_REQUEST
     unlink(fixture_file);
 #endif
     return 0;

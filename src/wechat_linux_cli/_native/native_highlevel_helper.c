@@ -36,8 +36,11 @@
 #ifndef NCUT_HIGHLEVEL_XML_REQUEST
 #define NCUT_HIGHLEVEL_XML_REQUEST 0
 #endif
-#if NCUT_HIGHLEVEL_IMAGE_REQUEST + NCUT_HIGHLEVEL_FILE_REQUEST + NCUT_HIGHLEVEL_XML_REQUEST > 1
-#error Image, file and XML request builds are distinct
+#ifndef NCUT_HIGHLEVEL_STICKER_REQUEST
+#define NCUT_HIGHLEVEL_STICKER_REQUEST 0
+#endif
+#if NCUT_HIGHLEVEL_IMAGE_REQUEST + NCUT_HIGHLEVEL_FILE_REQUEST + NCUT_HIGHLEVEL_XML_REQUEST + NCUT_HIGHLEVEL_STICKER_REQUEST > 1
+#error Image, file, XML and sticker request builds are distinct
 #endif
 
 typedef struct { void *object; void *control; } Shared;
@@ -148,6 +151,7 @@ static void perform_native(void) {
     if (!request.object || !request.control ||
         *(uintptr_t *)request.object != image_base +
             (NCUT_HIGHLEVEL_XML_REQUEST ? 0xa76fdd0 :
+             NCUT_HIGHLEVEL_STICKER_REQUEST ? 0xa89a068 :
              NCUT_HIGHLEVEL_FILE_REQUEST ? 0xa899f28 :
              NCUT_HIGHLEVEL_IMAGE_REQUEST ? 0xa899fc8 : 0xa899f78) ||
         *(uint32_t *)((unsigned char *)request.object + 0x7c) != (NCUT_HIGHLEVEL_XML_REQUEST ? 2 : 1)) {
@@ -220,7 +224,22 @@ static void perform_native(void) {
     api.assign((unsigned char *)request.object + 0x90, payload + 4, recipient_size);
 #else
     *(uint32_t *)((unsigned char *)request.object + 0xe4) =
-        NCUT_HIGHLEVEL_FILE_REQUEST ? 49 : NCUT_HIGHLEVEL_IMAGE_REQUEST ? 3 : 1;
+        NCUT_HIGHLEVEL_STICKER_REQUEST ? 47 : NCUT_HIGHLEVEL_FILE_REQUEST ? 49 : NCUT_HIGHLEVEL_IMAGE_REQUEST ? 3 : 1;
+#if NCUT_HIGHLEVEL_STICKER_REQUEST
+    /* 69af1a2 creates the native EmoticonDataInfo when absent; with no
+     * prepared media at +5d8, 69b08c0 permits loading the path at +f0.
+     * Keep both Shared holders factory-initialized. The client owns parsing,
+     * hashing, media preparation and upload for a new local sticker. */
+    char sticker_path[1025];
+    struct stat sticker_info;
+    if (text_size > sizeof(sticker_path)-1) { failure = 20; goto release; }
+    memcpy(sticker_path, payload + 4 + recipient_size, text_size);
+    sticker_path[text_size] = 0;
+    if (stat(sticker_path, &sticker_info) || !S_ISREG(sticker_info.st_mode) ||
+        sticker_info.st_size <= 0 || sticker_info.st_size > 10 * 1024 * 1024) {
+        failure = 20; goto release;
+    }
+#endif
 #if NCUT_HIGHLEVEL_FILE_REQUEST
     /* Normal UI file requests use the base source, app subtype 6, native
      * path +f0, display filename +158 and file byte count +170. */
@@ -245,7 +264,7 @@ static void perform_native(void) {
      * constructor initialized; the client pipeline prepares/uploads the file.
      * Each format uses a separately compiled, reviewed queued helper. */
     api.assign((unsigned char *)request.object +
-               ((NCUT_HIGHLEVEL_IMAGE_REQUEST || NCUT_HIGHLEVEL_FILE_REQUEST) ? 0xf0 : 0x5c8),
+               ((NCUT_HIGHLEVEL_IMAGE_REQUEST || NCUT_HIGHLEVEL_FILE_REQUEST || NCUT_HIGHLEVEL_STICKER_REQUEST) ? 0xf0 : 0x5c8),
                payload + 4 + recipient_size, text_size);
 #endif
     request_constructed = 1;
@@ -300,6 +319,7 @@ static int initialize(uintptr_t base, const void *data, size_t length,
         .manager = (void *)(base + 0x61a8af0),
         .request = (void *)(base +
             (NCUT_HIGHLEVEL_XML_REQUEST ? 0x4c82830 :
+             NCUT_HIGHLEVEL_STICKER_REQUEST ? 0x4969990 :
              NCUT_HIGHLEVEL_FILE_REQUEST ? 0x5322e80 :
              NCUT_HIGHLEVEL_IMAGE_REQUEST ? 0x4a01cf0 : 0x4a01e80)),
         .assign = (void *)(base + 0x450cf10),

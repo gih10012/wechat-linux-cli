@@ -71,6 +71,14 @@ class UnixServiceTests(unittest.TestCase):
             self.assertFalse(client.call(changed, self.path)['ok'])
         self.assertEqual(self.calls, [request])
 
+    def test_sticker_socket_preserves_exact_id_and_rejects_extra_payload(self):
+        request = {'operation': 'send_sticker', 'request_id': 'socket-sticker-01',
+                   'recipient': 'fixture@chatroom', 'file': '/owner/表情 $(literal).gif'}
+        self.assertTrue(client.call(request, self.path)['ok'])
+        for changed in ({**request, 'file': 'relative.gif'}, {**request, 'xml': 'extra'}):
+            self.assertFalse(client.call(changed, self.path)['ok'])
+        self.assertEqual(self.calls, [request])
+
     def test_forward_socket_validates_precise_source_and_keeps_arbitrary_target(self):
         request = {'operation': 'forward', 'request_id': 'forward-socket-01', 'account': 'me',
                    'chat': 'fixture-source@chatroom', 'local_id': 42, 'database': 'message/message_0.db',

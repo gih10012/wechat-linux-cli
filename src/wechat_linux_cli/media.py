@@ -56,3 +56,18 @@ def image_fingerprint(recipient, sha256):
     # Moving or renaming an identical image does not create a different send.
     return hashlib.sha256(b'image\0' + recipient.encode() + b'\0'
                           + bytes.fromhex(sha256)).hexdigest()
+
+
+def read_sticker(value):
+    data = read_regular(image_path(value))
+    suffix = ('.gif' if data.startswith((b'GIF87a', b'GIF89a')) else
+              '.png' if data.startswith(b'\x89PNG\r\n\x1a\n') else
+              '.jpg' if data.startswith(b'\xff\xd8\xff') else None)
+    if suffix is None:
+        raise ValueError('STICKER_FORMAT_UNSUPPORTED: expected GIF, PNG or JPEG bytes')
+    return data, suffix, hashlib.sha256(data).hexdigest()
+
+
+def sticker_fingerprint(recipient, sha256):
+    return hashlib.sha256(b'sticker\0' + recipient.encode() + b'\0'
+                          + bytes.fromhex(sha256)).hexdigest()

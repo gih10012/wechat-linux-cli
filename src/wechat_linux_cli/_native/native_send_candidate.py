@@ -114,7 +114,7 @@ def save(path, value):
 
 def compile_helper(work, uid=None, gid=None, source=None, *, highlevel_dispatch=False,
                    highlevel_send=False, highlevel_image=False, highlevel_file=False,
-                   highlevel_xml=False):
+                   highlevel_xml=False, highlevel_sticker=False):
     output = work/'helper.so'
     source = HERE/'native_send_helper.c' if source is None else Path(source)
     if highlevel_dispatch and source.resolve() != (HERE/'native_highlevel_helper.c').resolve():
@@ -136,6 +136,10 @@ def compile_helper(work, uid=None, gid=None, source=None, *, highlevel_dispatch=
         if not highlevel_dispatch or highlevel_image or highlevel_file:
             raise ValueError('XML request compilation requires a distinct queued dispatch build')
         definitions.append('-DNCUT_HIGHLEVEL_XML_REQUEST=1')
+    if highlevel_sticker:
+        if not highlevel_dispatch or highlevel_image or highlevel_file or highlevel_xml:
+            raise ValueError('Sticker request compilation requires a distinct queued dispatch build')
+        definitions.append('-DNCUT_HIGHLEVEL_STICKER_REQUEST=1')
     identity = {'user': uid, 'group': gid, 'extra_groups': []} if uid is not None and os.geteuid() == 0 else {}
     subprocess.run(['/usr/bin/gcc', '-shared', '-fPIC', '-O2', '-std=c11', '-Wall',
                     '-Wextra', '-Werror', '-pthread', *definitions, str(source),

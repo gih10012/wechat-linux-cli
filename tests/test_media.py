@@ -156,5 +156,68 @@ class ImageTests(unittest.TestCase):
         self.assertFalse(result['recipient_delivery_verified'])
 
 
+class StickerTests(unittest.TestCase):
+    def test_formats_bounds_and_cross_kind_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root/'emoji.bin'
+            for data, suffix in ((b'GIF89a' + b'fixture', '.gif'),
+                                 (b'\x89PNG\r\n\x1a\nfixture', '.png'),
+                                 (b'\xff\xd8\xfffixture', '.jpg')):
+                path.write_bytes(data)
+                read, actual, sha = media.read_sticker(str(path))
+                self.assertEqual((read, actual), (data, suffix))
+                self.assertNotEqual(media.sticker_fingerprint('filehelper', sha),
+                                    media.image_fingerprint('filehelper', sha))
+            path.write_bytes(b'not a supported sticker')
+            with self.assertRaisesRegex(ValueError, 'STICKER_FORMAT_UNSUPPORTED'):
+                media.read_sticker(str(path))
+            fifo = root/'fifo'
+            os.mkfifo(fifo)
+            with self.assertRaises(ValueError):
+                media.read_sticker(str(fifo))
+
+    def test_sticker_snapshot_replay_and_image_conflict(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {'WECHAT_LINUX_RUNTIME_DIR': temp}):
+            path = Path(temp)/'sticker.gif'
+            original = b'GIF89a snapshot fixture'
+            path.write_bytes(original)
+            request = {'operation': 'send_sticker', 'file': str(path),
+                       'recipient': 'fixture@chatroom', 'request_id': 'sticker-fixture-01'}
+            seen = []
+            def trial(send, snapshot, request_id, recipient, **options):
+                seen.append((send, Path(snapshot).read_bytes(), options['request_kind']))
+                path.write_bytes(b'GIF89a changed original')
+                return queued_result() if send else {'highlevel_preflight_verified': True}
+            with patch.object(backend.highlevel, 'client_identity', return_value=(10,99)), \
+                 patch.object(backend.highlevel, 'trial', side_effect=trial), \
+                 patch.object(backend, 'history_snapshot', return_value=None), \
+                 patch.object(backend.highlevel.base, 'save'):
+                self.assertTrue(backend.send_sticker(request)['ok'])
+            self.assertEqual(seen, [(False, original, 'sticker'), (True, original, 'sticker')])
+            path.write_bytes(original)
+            work = backend.work_for(request['request_id'])
+            work.mkdir(parents=True, exist_ok=True)
+            sha = media.read_sticker(str(path))[2]
+            (work/'request.json').write_text(json.dumps({'send': True, 'recipient': request['recipient'],
+                'request_kind': 'sticker', 'payload_sha256': media.sticker_fingerprint(request['recipient'], sha)}))
+            (work/'result.json').write_text(json.dumps(queued_result()))
+            with patch.object(backend.highlevel, 'trial') as call, patch.object(backend.highlevel, 'client_identity') as identity:
+                self.assertTrue(backend.send_sticker(request)['replayed'])
+                self.assertEqual(backend.send_image({**request, 'operation': 'send_image'})['code'], 'REQUEST_ID_CONFLICT')
+                path.write_bytes(original + b'changed')
+                self.assertEqual(backend.send_sticker(request)['code'], 'REQUEST_ID_CONFLICT')
+            call.assert_not_called()
+            identity.assert_not_called()
+
+    def test_sticker_history_is_only_a_type_candidate(self):
+        rows = [{'database': 'message_0.db', 'local_id': 1, 'type': 3, 'server_id': '1'},
+                {'database': 'message_0.db', 'local_id': 2, 'type': 47, 'server_id': '2'}]
+        result = backend.image_history_evidence([], rows, 47)
+        self.assertEqual(result['local_history_type_matches'], 1)
+        self.assertEqual(result['local_message_id'], 2)
+        self.assertIsNone(result['local_history_integrated'])
+
+
 if __name__ == '__main__':
     unittest.main()

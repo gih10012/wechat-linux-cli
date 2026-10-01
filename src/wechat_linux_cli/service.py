@@ -289,7 +289,8 @@ class Service:
             if self.stopping:
                 return {'ok': False, 'code': 'SERVICE_STOPPING'}
             return self.runner(request)
-        field = {'send_text': 'text', 'send_image': 'file', 'send_file': 'file', 'send_xml': 'file'}.get(operation)
+        field = {'send_text': 'text', 'send_image': 'file', 'send_file': 'file', 'send_xml': 'file',
+                 'send_sticker': 'file'}.get(operation)
         if field is None or set(request) != {'operation', field, 'request_id', 'recipient'}:
             raise ValueError('Unsupported operation or parameters')
         # Protocol validation occurs before starting any backend process.

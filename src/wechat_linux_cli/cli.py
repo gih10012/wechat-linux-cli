@@ -44,6 +44,10 @@ def parser():
     image.add_argument('--recipient', required=True, help='Exact native chat ID')
     image.add_argument('--file', required=True, help='Owner-readable PNG/JPEG, at most 10 MiB')
     image.add_argument('--request-id', required=True)
+    sticker = operations.add_parser('send-sticker', help='Send a GIF/PNG/JPEG as a native type 47 sticker')
+    sticker.add_argument('--recipient', required=True, help='Exact native chat ID')
+    sticker.add_argument('--file', required=True, help='Owner-readable GIF/PNG/JPEG, at most 10 MiB')
+    sticker.add_argument('--request-id', required=True)
     file = operations.add_parser('send-file', help='Send a regular file through the client attachment pipeline')
     file.add_argument('--recipient', required=True, help='Exact native chat ID')
     file.add_argument('--file', required=True, help='Owner-readable regular file, at most 10 MiB')
@@ -80,7 +84,7 @@ def run(argv=None):
     if args.operation == 'send-text':
         return client.call({'operation': 'send_text', 'recipient': args.recipient,
                             'text': args.text, 'request_id': args.request_id})
-    if args.operation in ('send-image', 'send-file', 'send-xml'):
+    if args.operation in ('send-image', 'send-file', 'send-xml', 'send-sticker'):
         from pathlib import Path
         return client.call({'operation': args.operation.replace('-', '_'), 'recipient': args.recipient,
                             'file': str(Path(args.file).expanduser().absolute()),

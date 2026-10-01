@@ -82,13 +82,15 @@ def replay(request):
         return None
     work = current if current.exists() else old
     recorded = json.loads((work/'request.json').read_text())
-    kind = {'send_image': 'image', 'send_file': 'file', 'send_xml': 'xml'}.get(request['operation'], 'text')
+    kind = {'send_image': 'image', 'send_file': 'file', 'send_xml': 'xml',
+            'send_sticker': 'sticker'}.get(request['operation'], 'text')
     if recorded.get('request_kind', 'text') != kind:
         matches = False
-    elif kind == 'image':
-        _data, _suffix, sha256 = media.read_image(request['file'])
+    elif kind in ('image', 'sticker'):
+        reader = media.read_sticker if kind == 'sticker' else media.read_image
+        _data, _suffix, sha256 = reader(request['file'])
         matches = (work == current and recorded.get('payload_sha256') ==
-                   media.image_fingerprint(request['recipient'], sha256))
+                   (media.sticker_fingerprint if kind == 'sticker' else media.image_fingerprint)(request['recipient'], sha256))
     elif kind == 'file':
         _data, filename, sha256 = media.read_file(request['file'])
         matches = (work == current and recorded.get('payload_sha256') ==
@@ -189,8 +191,9 @@ def stage_media(request, kind):
             data, _metadata, sha256 = cards.read_xml(request['file'])
         suffix = '.xml'
         filename = 'input.xml'
-    elif kind == 'image':
-        data, suffix, sha256 = media.read_image(request['file'])
+    elif kind in ('image', 'sticker'):
+        reader = media.read_sticker if kind == 'sticker' else media.read_image
+        data, suffix, sha256 = reader(request['file'])
         filename = 'input' + suffix
     else:
         data, filename, sha256 = media.read_file(request['file'])
@@ -228,11 +231,11 @@ def stage_image(request):
     return stage_media(request, 'image')
 
 
-def image_history_evidence(before, after):
+def image_history_evidence(before, after, message_type=3):
     if before is None or after is None:
         return {'local_history_integrated': None}
     ids = {(r['database'], r['local_id']) for r in before}
-    matches = [r for r in after if (r['database'], r['local_id']) not in ids and r.get('type') == 3]
+    matches = [r for r in after if (r['database'], r['local_id']) not in ids and r.get('type') == message_type]
     # Type and timing cannot identify image bytes. Leave integration unproved
     # and expose candidates for independent content/UI acceptance instead.
     proof = {'local_history_integrated': None, 'local_history_type_matches': len(matches),
@@ -265,7 +268,7 @@ def send_media(request, kind):
     result['ok'] = completed(result)
     if result['ok']:
         after = history_snapshot(request['recipient'])
-        evidence = (image_history_evidence(before, after) if kind == 'image' else
+        evidence = (image_history_evidence(before, after, 47 if kind == 'sticker' else 3) if kind in ('image', 'sticker') else
                     card_history_evidence(before, after, cards.read_xml(path)[1]) if kind == 'xml' else
                     file_history_evidence(before, after, Path(path).name))
         result.update(evidence, recipient_delivery_verified=False)
@@ -290,6 +293,10 @@ def file_history_evidence(before, after, filename):
 
 def send_image(request):
     return send_media(request, 'image')
+
+
+def send_sticker(request):
+    return send_media(request, 'sticker')
 
 
 def send_file(request):
@@ -331,6 +338,8 @@ def main():
             result = send_text(request)
         elif request['operation'] == 'send_image':
             result = send_image(request)
+        elif request['operation'] == 'send_sticker':
+            result = send_sticker(request)
         elif request['operation'] == 'send_file':
             result = send_file(request)
         elif request['operation'] == 'send_xml':
