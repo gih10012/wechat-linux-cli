@@ -17,6 +17,8 @@ def parser():
     command = Parser(description='Read and control the owner\'s local Linux WeChat client as JSON.')
     command.add_argument('--version', action='version', version=__version__)
     operations = command.add_subparsers(dest='operation', required=True)
+    from . import web
+    web.add_parser(operations)
     status = operations.add_parser('status', help='Check local database readability')
     status.add_argument('--account', default='me')
     conversations = operations.add_parser('conversations', help='List recent local conversations')
@@ -82,6 +84,9 @@ def parser():
 
 def run(argv=None):
     args = parser().parse_args(argv)
+    if args.operation == 'web':
+        from . import web
+        return web.run(args)
     if args.operation == 'moments':
         from ._native import native_moments
         return native_moments.read(args.account, args.user, args.limit, args.cursor, args.all_pages, args.include_xml)

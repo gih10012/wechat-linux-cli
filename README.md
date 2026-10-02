@@ -83,3 +83,22 @@ wechat-linux send-xml --recipient '精确目标chat_id' --file /路径/card.xml 
 `forward` 精确读取本机源消息的 appmsg XML，经客户端原生卡片解析、构造和消息创建流程发送。跨数据库分片的本地 ID 不唯一时必须指定 `database`，不自动挑选。当前支持公众号文章5、小程序33/36；实际验收覆盖5和33，36尚无真实样例验收。自定义 XML 为1..65536字节 UTF-8 `msg/appmsg` 文件，需非空标题和对应格式必需字段，不接受NUL、DTD或实体声明。客户端规范化 XML，不保证任意标签原样传输；小程序须保留真实 appid、username、页面路径和有效资源引用。合并聊天记录及其他 XML 类型仍待实现。
 
 同 ID 防重绑定目标、XML字节和源消息身份；转发与直接XML、不同源或修改内容相互冲突。原始XML、资源参数和快照仅保存在本机私有状态。`ok` 表示提交完成，`local_history_card_matches` 是新增标题/类型/URL匹配候选，手机收件和可点击另行验收。2026-10-01 普通CLI实际转发文章和小程序、发送修改标题/中文描述/换行/emoji的XML，均取得服务器ID并在Linux完整显示；独立字段读回和同ID防重通过，本人已通过ClawBot确认手机每种一条、显示完整及可打开。
+
+## Protocol web links
+
+`wechat-linux web resolve --url 'ACTUAL_LINK'` parses HTTP URLs or one explicit
+HTTP webview parameter without consuming authentication or guessing opaque
+mini-program tickets. `--probe` performs a GET; a successful response does not
+prove a successful business page. `web open --url 'HTTP_PAGE' --browser chrome`
+or `edge` requests a normal browser window.
+
+For an HTTP equivalent observed in the current client, `web bind --url
+'EXACT_SOURCE_LINK' --target 'OBSERVED_HTTP_SOURCE' --view json` saves a private
+exact-source mapping. `web relay --url 'EXACT_SOURCE_LINK' --seconds 300
+--browser chrome` streams its temporary localhost URL, serves complete readonly
+JSON/text/HTML text, and closes on Ctrl+C or expiry. Both CLIs share owner-only
+`~/.local/state/wechat-web/bindings.json`. Optional private HTTP session headers
+must declare their exact origin; authenticated cross-origin redirects are
+rejected. The relay does not provide client authentication, interactive JS SDK
+compatibility, or a mini-program runtime. No native helper/service is needed
+for these commands and no school-specific adapters are added.
