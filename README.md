@@ -133,9 +133,53 @@ source CLI playback of generated Chinese speech was independently captured
 at each receiving client's selected output stream (envelope correlations
 0.88 and 0.93). Standalone routing, restoration, and no-playback replay also
 passed. Installed-command acceptance is recorded separately by the skill.
-Call placement/control and selected-member group calls remain in development.
+Selected-member group calls and call acceptance remain in development.
 The audio result's `remote_delivery_verified` and
 `call_connection_verified` stay false: neither is inferred from local playback.
 
 The underlying monitor-source behavior is documented in
 [PulseAudio modules](https://wiki.freedesktop.org/www/Software/PulseAudio/Documentation/User/Modules/).
+
+## Normal private-call controls on niri
+
+```sh
+wechat-linux call inspect --pid CLIENT_PID --start-time PROC_START_TIME
+wechat-linux call open --pid CLIENT_PID --start-time PROC_START_TIME --chat EXACT_CONTACT_ID
+wechat-linux call start --pid CLIENT_PID --start-time PROC_START_TIME --chat EXACT_CONTACT_ID --request-id CALL_ID
+wechat-linux call status --request-id CALL_ID
+wechat-linux call play --request-id CALL_ID --file /path/notification.wav --audio-request-id AUDIO_ID --wait-seconds 30
+wechat-linux call hangup --request-id CALL_ID
+```
+
+These commands operate the normal Qt UI through AT-SPI and keyboard input,
+using `niri`, `wtype`, and system `/usr/bin/python3` with PyGObject/libatspi.
+They require a logged-in desktop and share its focus. They do not use a native
+VoIP API. GUI placement, connected-state readback, replay without a second
+invitation, and normal hangup have been tested against an independently
+accepting WeCom client. A further source CLI test waited for connection before
+playing generated Chinese speech and restoring the capture stream.
+
+The display-session helper from `niri-computer-use` preserves power/brightness
+and provides a watchdog. Its default path is
+`~/.local/share/niri-computer-use/bin/niri-desktop-session.py`; override with
+`WECHAT_DESKTOP_SESSION_HELPER`. Missing/failed entry refuses input. An already
+owned display session is refused. Read-only inspection does not wake a screen.
+
+`open` and `start` resolve an exact ID in the selected account's contact
+database, require those account databases to remain open in the specified
+process, and verify the visible unique contact label and external-contact
+namespace before any invitation. The UI does not expose its exact native ID;
+ambiguous labels in the same namespace are refused. `open` can navigate group
+chats, but group calls and selected-member invitations are not implemented yet.
+Call acceptance is still a computer-use operation.
+
+Private call journals are in `~/.local/state/wechat-calls/`. An ID binds its
+account, target, process and start time. Repeating it never redials. Hangup
+requires the original accessibility object and compositor window identity;
+another call cannot be hung up using an old ID. A ringing capture stream does
+not prove connection: `call play` requires that same call window's connected
+timer and hangup control. The audio result still does not prove remote delivery.
+For an uncertain invitation, inspect the original ID and independently check
+that it ended before explicitly using `call resolve --request-id CALL_ID
+--ended`. Resolution only updates the journal, retains an unknown outcome,
+and never sends another invitation or repeats sound.

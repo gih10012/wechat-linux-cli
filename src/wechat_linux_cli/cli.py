@@ -21,6 +21,8 @@ def parser():
     web.add_parser(operations)
     from . import audio
     audio.add_parser(operations)
+    from . import call as call_ui
+    call_ui.add_parser(operations)
     status = operations.add_parser('status', help='Check local database readability')
     status.add_argument('--account', default='me')
     conversations = operations.add_parser('conversations', help='List recent local conversations')
@@ -86,6 +88,9 @@ def parser():
 
 def run(argv=None):
     args = parser().parse_args(argv)
+    if args.operation == 'call':
+        from . import call as call_ui
+        return call_ui.run(args)
     if args.operation == 'audio':
         from . import audio
         return audio.run(args)
