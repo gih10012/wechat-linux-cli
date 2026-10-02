@@ -102,3 +102,40 @@ must declare their exact origin; authenticated cross-origin redirects are
 rejected. The relay does not provide client authentication, interactive JS SDK
 compatibility, or a mini-program runtime. No native helper/service is needed
 for these commands and no school-specific adapters are added.
+
+## Existing call audio
+
+```sh
+wechat-linux audio streams --pid CLIENT_PID --start-time PROC_START_TIME
+wechat-linux audio play --pid CLIENT_PID --start-time PROC_START_TIME --source-output STREAM_ID --file /path/notification.wav --request-id UNIQUE_ID
+wechat-linux audio status --request-id UNIQUE_ID
+wechat-linux audio recover --request-id UNIQUE_ID
+```
+
+These commands require a local PulseAudio-compatible server (including
+PipeWire), `pactl`, and `paplay`. `play` accepts mono/stereo PCM WAV, up to
+5 minutes and 32 MiB. The caller first confirms the call is connected and
+authorizes its participants, then selects one capture stream from `streams`.
+A capture stream by itself does not prove connection. The commands do not
+place, accept, invite members to, or hang up a call.
+
+Playback temporarily routes that exact process/start time/stream identity to
+a private null-sink monitor, then restores its original input and removes the
+module. No global defaults are changed. A disconnected, muted, replaced, or
+manually rerouted stream stops playback. Same-ID replay never plays again;
+changed content/target conflicts. Journals are private in
+`~/.local/state/wechat-audio/`. Following an abrupt process exit, check the
+original ID and run `recover` to clean up before any new audio request;
+recovery never repeats audio.
+
+Actual acceptance covers a normal GUI WeCom ↔ Linux WeChat private call:
+source CLI playback of generated Chinese speech was independently captured
+at each receiving client's selected output stream (envelope correlations
+0.88 and 0.93). Standalone routing, restoration, and no-playback replay also
+passed. Installed-command acceptance is recorded separately by the skill.
+Call placement/control and selected-member group calls remain in development.
+The audio result's `remote_delivery_verified` and
+`call_connection_verified` stay false: neither is inferred from local playback.
+
+The underlying monitor-source behavior is documented in
+[PulseAudio modules](https://wiki.freedesktop.org/www/Software/PulseAudio/Documentation/User/Modules/).
