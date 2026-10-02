@@ -133,14 +133,15 @@ source CLI playback of generated Chinese speech was independently captured
 at each receiving client's selected output stream (envelope correlations
 0.88 and 0.93). Standalone routing, restoration, and no-playback replay also
 passed. Installed-command acceptance is recorded separately by the skill.
-Selected-member group calls and call acceptance remain in development.
+Private call acceptance is available through `call answer`. Group connection
+and automatic playback still need separate acceptance.
 The audio result's `remote_delivery_verified` and
 `call_connection_verified` stay false: neither is inferred from local playback.
 
 The underlying monitor-source behavior is documented in
 [PulseAudio modules](https://wiki.freedesktop.org/www/Software/PulseAudio/Documentation/User/Modules/).
 
-## Normal private-call controls on niri
+## Normal call controls on niri
 
 ```sh
 wechat-linux call inspect --pid CLIENT_PID --start-time PROC_START_TIME
@@ -170,8 +171,9 @@ owned display session is refused. Read-only inspection does not wake a screen.
 database, require those account databases to remain open in the specified
 process, and verify the visible unique contact label and external-contact
 namespace before any invitation. The UI does not expose its exact native ID;
-ambiguous labels in the same namespace are refused. `open` can navigate group
-chats, but group calls and selected-member invitations are not implemented yet.
+ambiguous labels in the same namespace are refused. Local search uses real
+keyboard input and waits for matching results in the contact or group section
+before navigating. A network search row is never treated as a local contact.
 `inspect` reports incoming invitations with an `invitation_token`. `answer`
 accepts that exact invitation: its process, accessibility objects and matching
 compositor popup must remain unchanged. Animated caption dots do not change the
@@ -191,3 +193,21 @@ For an uncertain invitation, inspect the original ID and independently check
 that it ended before explicitly using `call resolve --request-id CALL_ID
 --ended`. Resolution only updates the journal, retains an unknown outcome,
 and never sends another invitation or repeats sound.
+
+For a group, explicitly supply each invited member's exact contact ID:
+
+```sh
+wechat-linux call group-prepare --pid CLIENT_PID --start-time PROC_START_TIME --chat EXACT_GROUP_ID --member MEMBER_ID --member ANOTHER_MEMBER_ID
+wechat-linux call start --pid CLIENT_PID --start-time PROC_START_TIME --chat EXACT_GROUP_ID --member MEMBER_ID --request-id GROUP_CALL_ID
+```
+
+`group-prepare` verifies the group header, cached membership, unique member
+labels, selected checkboxes and count, then cancels and verifies that the
+selector closed. It does not send an invitation. One-member and two-member
+selection have been tested in the owner's normal client. `start` uses the
+same checks and then submits the normal selector once. It accepts one to eight
+distinct other members and binds the sorted set to the request ID; the same ID
+cannot change members or repeat an invitation. Calling an entire group by
+default is refused. Group invitation and hangup require separate runtime
+acceptance. Group status reports `group_connection_unverified`; `call play`
+refuses group playback until a reliable remote-join check is implemented.

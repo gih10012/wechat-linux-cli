@@ -1,6 +1,7 @@
 """Replay-safe control of normal Qt private-call UI on niri."""
 from contextlib import contextmanager
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -65,6 +66,48 @@ def target(account, chat):
     if not name or len(name) > 256 or any(c in name for c in '\n\r\0'):
         raise ValueError('UNSUPPORTED_CALL_CONTACT_LABEL')
     return dict(chat=chat, name=name, alias=row['alias'] or '', external=external, group=group), str(Path(keys['database_root']).resolve())
+
+
+def group_spec(account, chat, members):
+    if not members or len(members) > 8 or len(set(members)) != len(members):
+        raise ValueError('GROUP_REQUIRES_ONE_TO_EIGHT_DISTINCT_MEMBER_IDS')
+    keys = load_keys(account)
+    database_root = Path(keys['database_root']).resolve()
+    self_id = database_root.parent.name.rsplit('_', 1)[0]
+    conn, _ = open_database(keys, 'contact/contact.db')
+    try:
+        rows = [dict(r) for r in conn.execute(
+            'SELECT n.username chat, c.remark, c.nick_name, c.alias FROM chatroom_member m '
+            'JOIN name2id q ON q.rowid=m.room_id JOIN name2id n ON n.rowid=m.member_id '
+            'LEFT JOIN contact c ON c.username=n.username WHERE q.username=?', (chat,))]
+    finally:
+        conn.close()
+    if not rows or len({r['chat'] for r in rows}) != len(rows):
+        raise ValueError('COMPLETE_CACHED_GROUP_MEMBERSHIP_REQUIRED')
+    by_id = {r['chat']: dict(chat=r['chat'], name=r['remark'] or r['nick_name'] or r['chat'],
+                           alias=r['alias'] or '') for r in rows}
+    if self_id not in by_id or self_id in members or any(v not in by_id for v in members):
+        raise ValueError('EXACT_OTHER_GROUP_MEMBER_IDS_REQUIRED')
+    selected = [by_id[v] for v in sorted(members)]
+    for member in selected:
+        if sum(v['name'] == member['name'] for v in by_id.values()) != 1:
+            raise ValueError('AMBIGUOUS_GROUP_MEMBER_LABEL')
+    for member in [by_id[self_id], *selected]:
+        if not member['name'] or len(member['name']) > 256 or any(c in member['name'] for c in '\r\n\0'):
+            raise ValueError('UNSUPPORTED_GROUP_MEMBER_LABEL')
+    return dict(self_member=by_id[self_id], members=selected, member_count=len(rows),
+                membership_sha256=hashlib.sha256(json.dumps(sorted(by_id)).encode()).hexdigest())
+
+
+def prepare_group(account, chat, pid, process_time, members):
+    resolved, database_root = target(account, chat)
+    if not resolved.get('group'):
+        raise ValueError('EXACT_GROUP_CHAT_ID_REQUIRED')
+    specification = group_spec(account, chat, members)
+    resolved['member_count'] = specification['member_count']
+    with desktop_session():
+        return ui(dict(operation='group_prepare', pid=pid, start_time=process_time,
+                       target=resolved, database_root=database_root, group_spec=specification))
 
 
 def ui(request):
@@ -142,17 +185,25 @@ def open_chat(account, chat, pid, process_time):
                        target=resolved, database_root=database_root))
 
 
-def start(account, chat, pid, process_time, request_id):
+def start(account, chat, pid, process_time, request_id, members=None):
     path = record_path(request_id)
     intent = dict(account=account, chat=chat, pid=pid, start_time=process_time)
+    if members:
+        if len(set(members)) != len(members):
+            raise ValueError('DUPLICATE_GROUP_MEMBER_IDS')
+        intent['members'] = sorted(members)
     if path.exists() or path.is_symlink():
         saved = read_record(path)
         if saved['intent'] != intent:
             raise ValueError('CALL_REQUEST_ID_CONFLICT')
         return dict(saved, replayed=True)
     resolved, database_root = target(account, chat)
+    specification = None
     if resolved.get('group'):
-        raise ValueError('GROUP_CALL_MEMBER_SELECTION_NOT_IMPLEMENTED')
+        specification = group_spec(account, chat, members)
+        resolved['member_count'] = specification['member_count']
+    elif members:
+        raise ValueError('MEMBERS_REQUIRE_GROUP_CHAT')
     live = inspect(pid, process_time)
     if not live.get('ok'):
         return live
@@ -174,12 +225,15 @@ def start(account, chat, pid, process_time, request_id):
                   ok=False, status='prepared', automatic_retry_allowed=False, created_at=time.time(),
                   transport='qt_atspi_niri', native_call_api_used=False,
                   call_connection_verified=False, remote_delivery_verified=False)
+    if specification:
+        record['group_spec'] = specification
     write_record(path, record)
     ui_entered = False
     try:
         with desktop_session():
             ui_entered = True
-            result = ui(dict(operation='start', **intent, target=resolved, database_root=database_root))
+            result = ui(dict(operation='start', **intent, target=resolved, database_root=database_root,
+                             group_spec=specification))
             if result.get('ok') and result.get('active'):
                 record.update(ok=True, status='active', handle=result['active']['handle'],
                               invitation_observed=True, call_connection_verified=result['call_connection_verified'],
@@ -324,15 +378,18 @@ def play(request_id, file, audio_request_id, wait_seconds=0, source_output=None)
 def add_parser(operations):
     parser = operations.add_parser('call', help='Control normal Qt private-call UI on niri; requires desktop accessibility')
     actions = parser.add_subparsers(dest='call_action', required=True)
-    for action in ('inspect', 'open', 'start'):
+    for action in ('inspect', 'open', 'start', 'group-prepare'):
         command = actions.add_parser(action)
         command.add_argument('--pid', type=int, required=True)
         command.add_argument('--start-time', type=int, required=True)
-        if action in ('open', 'start'):
+        if action in ('open', 'start', 'group-prepare'):
             command.add_argument('--account', default='me')
             command.add_argument('--chat', required=True, help='Exact contact ID; ambiguous display labels are refused')
         if action == 'start':
             command.add_argument('--request-id', required=True)
+        if action in ('start', 'group-prepare'):
+            command.add_argument('--member', action='append', required=action == 'group-prepare',
+                                 help='Exact invited group member ID; repeat for selected members only')
     command = actions.add_parser('answer', help='Accept one exact observed GUI invitation; caller authorization is separate')
     command.add_argument('--account', default='me')
     command.add_argument('--pid', type=int, required=True)
@@ -369,8 +426,10 @@ def run(args):
                 return resolve_ended(args.request_id)
             if args.call_action == 'open':
                 return open_chat(args.account, args.chat, args.pid, args.start_time)
+            if args.call_action == 'group-prepare':
+                return prepare_group(args.account, args.chat, args.pid, args.start_time, args.member)
             if args.call_action == 'start':
-                return start(args.account, args.chat, args.pid, args.start_time, args.request_id)
+                return start(args.account, args.chat, args.pid, args.start_time, args.request_id, args.member)
             return hangup(args.request_id)
     except (ValueError, OSError, subprocess.SubprocessError) as error:
         code = str(error) if isinstance(error, ValueError) else type(error).__name__

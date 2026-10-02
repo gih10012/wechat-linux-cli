@@ -1,6 +1,7 @@
 from contextlib import contextmanager, nullcontext
 import os
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -196,6 +197,193 @@ class CallTests(unittest.TestCase):
             result = REAL_UI(dict(operation='answer', pid=123, start_time=10))
         self.assertTrue(result['accept_entered'])
         self.assertFalse(result['dial_entered'])
+
+    def test_group_replay_uses_same_member_set_and_rejects_changed_invites(self):
+        group = dict(chat='room@chatroom', name='Own test group', group=True)
+        spec = dict(self_member=dict(chat='self', name='Self'),
+                    members=[dict(chat='a', name='A'), dict(chat='b', name='B')], member_count=3)
+        with patch.object(call, 'target', return_value=(group, '/private/db')), patch.object(call, 'group_spec', return_value=spec):
+            call.start('me', group['chat'], 123, 10, 'group', ['b', 'a'])
+        count = len(self.actions)
+        self.assertTrue(call.start('me', group['chat'], 123, 10, 'group', ['a', 'b'])['replayed'])
+        with self.assertRaisesRegex(ValueError, 'CALL_REQUEST_ID_CONFLICT'):
+            call.start('me', group['chat'], 123, 10, 'group', ['a'])
+        self.assertEqual(len(self.actions), count)
+
+    def test_private_call_rejects_group_members_before_navigation(self):
+        with self.assertRaisesRegex(ValueError, 'MEMBERS_REQUIRE_GROUP_CHAT'):
+            call.start('me', 'wxid_test', 123, 10, 'private', ['a'])
+        self.assertEqual(self.actions, [])
+
+
+class SearchNavigationTests(unittest.TestCase):
+    def test_network_result_with_same_name_cannot_replace_local_group_result(self):
+        names = ['搜索网络结果', 'Exact', '联系人', 'Other', '群聊', 'Exact', '聊天记录', 'Exact']
+        rows = [dict(parent='/results', role='list item', showing=True, name=name) for name in names]
+        self.assertEqual(Ui.search_positions(rows, dict(path='/results'), '群聊', 'Exact'), [2])
+        self.assertEqual(Ui.search_positions(rows, dict(path='/results'), '联系人', 'Exact'), [])
+
+    def test_search_requires_one_requested_section_and_visible_local_matches(self):
+        rows = [dict(parent='/results', role='list item', showing=True, name='Exact')]
+        self.assertEqual(Ui.search_positions(rows, dict(path='/results'), '群聊', 'Exact'), [])
+        rows.insert(0, dict(parent='/results', role='list item', showing=True, name='群聊'))
+        rows.append(dict(parent='/results', role='list item', showing=False, name='Exact'))
+        self.assertEqual(Ui.search_positions(rows, dict(path='/results'), '群聊', 'Exact'), [0])
+        rows.insert(0, dict(parent='/results', role='list item', showing=True, name='群聊'))
+        self.assertEqual(Ui.search_positions(rows, dict(path='/results'), '群聊', 'Exact'), [])
+
+    def test_search_with_lost_entry_focus_never_types(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        ui = Ui.__new__(Ui)
+        ui.spi = SimpleNamespace(StateType=SimpleNamespace(FOCUSED='focused'))
+        ui.shell = Mock(); ui.focused = Mock()
+        node = Mock()
+        node.get_component_iface.return_value.grab_focus.return_value = True
+        node.get_state_set.return_value.contains.return_value = False
+        with self.assertRaisesRegex(ValueError, 'CALL_SEARCH_FOCUS_CHANGED'):
+            ui.search_text(dict(id=42), node, 'Exact')
+        ui.shell.assert_not_called()
+
+    def test_search_waits_for_async_keyboard_text_before_navigation(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        ui = Ui.__new__(Ui)
+        read = Mock(side_effect=['partial', 'Exact'])
+        ui.spi = SimpleNamespace(StateType=SimpleNamespace(FOCUSED='focused'), Text=SimpleNamespace(get_text=read))
+        ui.shell = Mock(); ui.focused = Mock()
+        node = Mock()
+        node.get_component_iface.return_value.grab_focus.return_value = True
+        node.get_state_set.return_value.contains.return_value = True
+        with patch('wechat_linux_cli._call_ui.time.sleep'):
+            ui.search_text(dict(id=42), node, 'Exact')
+        self.assertEqual(read.call_count, 2)
+        ui.shell.assert_called_once()
+
+
+class GroupMembershipTests(unittest.TestCase):
+    def specification(self, members, duplicate_label=False):
+        conn = sqlite3.connect(':memory:')
+        self.addCleanup(conn.close)
+        conn.row_factory = sqlite3.Row
+        conn.executescript('CREATE TABLE contact(username TEXT, remark TEXT, nick_name TEXT, alias TEXT);'
+                           'CREATE TABLE name2id(username TEXT); CREATE TABLE chatroom_member(room_id INT, member_id INT);')
+        conn.executemany('INSERT INTO name2id VALUES(?)', [('room@chatroom',), ('wxid_self',), ('a',), ('b',)])
+        conn.executemany('INSERT INTO chatroom_member VALUES(1,?)', [(2,), (3,), (4,)])
+        conn.executemany('INSERT INTO contact VALUES(?,?,?,?)',
+                         [('wxid_self', '', 'Self', ''), ('a', '', 'Same' if duplicate_label else 'A', 'alias-a'),
+                          ('b', '', 'Same' if duplicate_label else 'B', 'alias-b')])
+        with patch.object(call, 'load_keys', return_value=dict(database_root='/cache/wxid_self_123/db_storage')), \
+                patch.object(call, 'open_database', return_value=(conn, None)):
+            return call.group_spec('me', 'room@chatroom', members)
+
+    def test_only_exact_cached_other_members_can_be_invited(self):
+        self.assertEqual(self.specification(['b'])['members'], [dict(chat='b', name='B', alias='alias-b')])
+        for members in (['unknown'], ['wxid_self']):
+            with self.assertRaisesRegex(ValueError, 'EXACT_OTHER_GROUP_MEMBER_IDS_REQUIRED'):
+                self.specification(members)
+
+    def test_same_name_members_are_refused_before_gui_selection(self):
+        with self.assertRaisesRegex(ValueError, 'AMBIGUOUS_GROUP_MEMBER_LABEL'):
+            self.specification(['a'], duplicate_label=True)
+
+    def test_group_requires_explicit_nonduplicate_members(self):
+        for members in (None, [], ['a', 'a'], list('123456789')):
+            with self.assertRaisesRegex(ValueError, 'GROUP_REQUIRES_ONE_TO_EIGHT_DISTINCT_MEMBER_IDS'):
+                self.specification(members)
+
+
+class GroupSelectorTests(unittest.TestCase):
+    def group(self, selection_failure=False):
+        ui = Ui.__new__(Ui)
+        ui.request = dict(group_spec=dict(members=[dict(chat='b', name='B')]))
+        ui.dial_entered = False
+        popup = dict(id=43)
+        visible = [True]
+        actions = []
+        ui.open_target = lambda: dict(id=42)
+        ui.main_frame = lambda rows: '/main'
+        ui.tree = lambda: [dict(path='/selector', name='微信选择成员', role='filler', enabled=True,
+                               showing=visible[0])]
+        ui.window = lambda name: popup
+        ui.windows = lambda: [popup] if visible[0] else []
+        ui.focus = lambda window: None
+
+        def button(window, name, frame, **kwargs):
+            actions.append(name)
+            if name == '取消':
+                visible[0] = False
+
+        def selection(window, frame):
+            if selection_failure:
+                raise ValueError('GROUP_MEMBER_FOCUS_NOT_VERIFIED')
+
+        ui.button = button
+        ui.select_group_members = selection
+        return ui, actions
+
+    def test_prepare_cancels_and_observes_original_selector_closed(self):
+        ui, actions = self.group()
+        result = ui.group(False)
+        self.assertTrue(result['selector_closed_verified'])
+        self.assertFalse(result['invitation_performed'])
+        self.assertEqual(actions, ['语音通话', '取消'])
+
+    def test_selection_error_cancels_without_submitting_invitation(self):
+        ui, actions = self.group(selection_failure=True)
+        with self.assertRaisesRegex(ValueError, 'GROUP_MEMBER_FOCUS_NOT_VERIFIED'):
+            ui.group(True)
+        self.assertFalse(ui.dial_entered)
+        self.assertEqual(actions, ['语音通话', '取消'])
+
+    def selector(self, wrong_focus=False, extra_checked=False):
+        from types import SimpleNamespace
+        ui = Ui.__new__(Ui)
+        ui.request = dict(group_spec=dict(self_member=dict(chat='self', name='Self'), members=[dict(chat='b', name='B')]))
+        rows = [dict(path='/members', role='list', name='请勾选需要添加的联系人', frame='/selector',
+                     showing=True, enabled=True, node=SimpleNamespace(get_component_iface=lambda: SimpleNamespace(grab_focus=lambda: True)))]
+        for name in ['Self', 'A', 'B']:
+            rows.append(dict(path='/' + name, parent='/members', role='check box', name=name, frame='/selector',
+                             showing=True, enabled=True, focused=False, checked=name == 'Self'))
+        rows.append(dict(path='/complete', role='button', name='完成', frame='/selector', showing=True, enabled=True))
+        actions = []
+
+        def keys(window, *pressed):
+            actions.append(pressed)
+            if pressed[0] == 'Home':
+                selected = rows[1 + pressed.count('Down')]
+                if wrong_focus:
+                    selected = rows[2]
+                for r in rows[1:4]:
+                    r['focused'] = r is selected
+            elif pressed == ('space',):
+                next(r for r in rows if r.get('focused'))['checked'] = True
+                if extra_checked:
+                    rows[2]['checked'] = True
+
+        ui.keys = keys
+        ui.tree = lambda: rows
+        ui.group_member_list = lambda frame: (rows, rows[0], rows[1:4])
+        ui.selection_count = lambda rows, frame: sum(r.get('checked', False) for r in rows)
+        ui.target_matches = lambda rows: True
+        return ui, actions
+
+    def test_keyboard_selection_checks_only_requested_member(self):
+        ui, actions = self.selector()
+        ui.select_group_members(dict(id=42), '/selector')
+        self.assertEqual(actions, [('Home', 'Down', 'Down'), ('space',)])
+        self.assertEqual([r['name'] for r in ui.tree() if r.get('checked')], ['Self', 'B'])
+
+    def test_wrong_focused_row_is_never_toggled(self):
+        ui, actions = self.selector(wrong_focus=True)
+        with self.assertRaisesRegex(ValueError, 'GROUP_MEMBER_FOCUS_NOT_VERIFIED'):
+            ui.select_group_members(dict(id=42), '/selector')
+        self.assertNotIn(('space',), actions)
+
+    def test_additional_unrequested_selection_is_rejected_before_submit(self):
+        ui, _ = self.selector(extra_checked=True)
+        with self.assertRaisesRegex(ValueError, 'GROUP_MEMBER_CHECK_NOT_VERIFIED'):
+            ui.select_group_members(dict(id=42), '/selector')
 
 
 class QtStateTests(unittest.TestCase):
