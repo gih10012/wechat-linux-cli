@@ -4,6 +4,7 @@ Invoked with a JSON request on stdin. No screen coordinates or private APIs.
 The parent journals before dial; an error after Return must never be retried.
 """
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -17,6 +18,7 @@ class Ui:
         self.request = request
         self.pid = request['pid']
         self.dial_entered = False
+        self.accept_entered = False
         process = self.identity()
         for item in (process / 'environ').read_bytes().split(b'\0'):
             name, _, value = item.partition(b'=')
@@ -60,6 +62,15 @@ class Ui:
         items = [w for w in self.windows() if w['title'] == title]
         if len(items) != 1:
             raise ValueError('CALL_WINDOW_NOT_UNIQUE')
+        return items[0]
+
+    def invitation_window(self, rows, caption):
+        frame = next(r for r in rows if r['path'] == caption['frame'] and r['role'] == 'frame')
+        width, height = frame['bounds'][2:]
+        items = [w for w in self.windows() if w['title'] == frame['name']
+                 and w.get('layout', {}).get('window_size') == [width, height]]
+        if width <= 0 or height <= 0 or len(items) != 1:
+            raise ValueError('INCOMING_WINDOW_NOT_UNIQUE')
         return items[0]
 
     def focused(self, window):
@@ -118,15 +129,19 @@ class Ui:
             raise ValueError('CALL_CONTROL_NOT_UNIQUE_OR_DISABLED')
         return matches[0]
 
-    def button(self, window, name, frame):
+    def button(self, window, name, frame, expected_path=None, accepting=False):
         self.focus(window)
         row = self.one(self.tree(), name, 'button', frame)
+        if expected_path is not None and row['path'] != expected_path:
+            raise ValueError('CALL_CONTROL_OBJECT_CHANGED')
         node = row['node']
         if not node.get_component_iface().grab_focus():
             raise ValueError('CALL_ELEMENT_FOCUS_FAILED')
         node.clear_cache()
         if not node.get_state_set().contains(self.spi.StateType.FOCUSED):
             raise ValueError('CALL_ELEMENT_FOCUS_CHANGED')
+        if accepting:
+            self.accept_entered = True
         self.keys(window, 'space')
 
     def main_frame(self, rows):
@@ -148,8 +163,19 @@ class Ui:
     def inspect(self):
         rows = self.tree()
         frames = [r for r in rows if r['role'] == 'frame' and r['name'] == '语音聊天' and r['showing']]
-        incoming = [r['name'][:256] for r in rows if r['showing'] and r['role'] == 'label'
-                    and '邀请你语音' in r['name']]
+        incoming = []
+        captions = [r for r in rows if r['showing'] and r['role'] == 'label'
+                    and re.fullmatch(r'.+邀请你语音通话[.。…]*', r['name'])]
+        for caption in captions:
+            accept = self.one(rows, '接听', 'button', caption['frame'])
+            descriptor = dict(pid=self.pid, start_time=self.request['start_time'],
+                              bus=caption['bus'], frame=caption['frame'],
+                              caption_path=caption['path'], accept_path=accept['path'],
+                              caption=caption['name'].rstrip('.。…'),
+                              window_id=self.invitation_window(rows, caption)['id'])
+            token = hashlib.sha256(json.dumps(descriptor, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+            incoming.append(dict(descriptor, invitation_token=token, caller_identity_verified=False,
+                                 participants_verified=False))
         result = dict(ok=True, transport='qt_atspi_niri', read_only=True,
                       incoming=incoming, active=None, call_connection_verified=False)
         if not frames:
@@ -271,6 +297,30 @@ class Ui:
             time.sleep(.1)
         raise ValueError('CALL_HANGUP_RESULT_UNKNOWN')
 
+    def answer(self):
+        live = self.inspect()
+        matches = [v for v in live['incoming'] if v['invitation_token'] == self.request['invitation_token']]
+        if live['active'] or len(matches) != 1:
+            raise ValueError('EXACT_INCOMING_INVITATION_NOT_FOUND')
+        invitation = matches[0]
+        windows = [w for w in self.windows() if w['id'] == invitation['window_id']]
+        if len(windows) != 1:
+            raise ValueError('INCOMING_WINDOW_CHANGED')
+        window = windows[0]
+        self.focus(window)
+        current = self.inspect()
+        if not any(v == invitation for v in current['incoming']):
+            raise ValueError('INCOMING_INVITATION_CHANGED')
+        self.button(window, '接听', invitation['frame'], invitation['accept_path'], accepting=True)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            current = self.inspect()
+            if current['active']:
+                return dict(current, read_only=False, accept_entered=True,
+                            accepted_invitation=invitation, invitation_performed=False)
+            time.sleep(.1)
+        raise ValueError('CALL_ACCEPT_RESULT_UNKNOWN')
+
 
 def main():
     ui = None
@@ -281,6 +331,7 @@ def main():
     except Exception as error:
         code = str(error) if isinstance(error, ValueError) else type(error).__name__
         result = dict(ok=False, code=code, dial_entered=bool(ui and ui.dial_entered),
+                      accept_entered=bool(ui and ui.accept_entered),
                       message=str(error)[:256], automatic_retry_allowed=False)
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result.get('ok') else 1

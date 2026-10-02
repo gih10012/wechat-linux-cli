@@ -146,6 +146,7 @@ The underlying monitor-source behavior is documented in
 wechat-linux call inspect --pid CLIENT_PID --start-time PROC_START_TIME
 wechat-linux call open --pid CLIENT_PID --start-time PROC_START_TIME --chat EXACT_CONTACT_ID
 wechat-linux call start --pid CLIENT_PID --start-time PROC_START_TIME --chat EXACT_CONTACT_ID --request-id CALL_ID
+wechat-linux call answer --pid CLIENT_PID --start-time PROC_START_TIME --invitation-token OBSERVED_TOKEN --request-id ANSWER_ID
 wechat-linux call status --request-id CALL_ID
 wechat-linux call play --request-id CALL_ID --file /path/notification.wav --audio-request-id AUDIO_ID --wait-seconds 30
 wechat-linux call hangup --request-id CALL_ID
@@ -171,10 +172,17 @@ process, and verify the visible unique contact label and external-contact
 namespace before any invitation. The UI does not expose its exact native ID;
 ambiguous labels in the same namespace are refused. `open` can navigate group
 chats, but group calls and selected-member invitations are not implemented yet.
-Call acceptance is still a computer-use operation.
+`inspect` reports incoming invitations with an `invitation_token`. `answer`
+accepts that exact invitation: its process, accessibility objects and matching
+compositor popup must remain unchanged. Animated caption dots do not change the
+token. The caller caption does not expose an exact contact ID, and authorization
+to accept must be established separately. A token is not a caller identity.
+Ordinary installed CLI acceptance, waiting for connection, generated WAV
+playback, same-ID replay and normal hangup passed against a WeCom GUI caller.
 
 Private call journals are in `~/.local/state/wechat-calls/`. An ID binds its
-account, target, process and start time. Repeating it never redials. Hangup
+account, target or invitation token, process and start time. Repeating it never
+redials or accepts another invitation. Hangup
 requires the original accessibility object and compositor window identity;
 another call cannot be hung up using an old ID. A ringing capture stream does
 not prove connection: `call play` requires that same call window's connected

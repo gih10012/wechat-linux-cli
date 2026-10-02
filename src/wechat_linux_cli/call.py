@@ -75,14 +75,16 @@ def ui(request):
                                 input=json.dumps(request, ensure_ascii=False), capture_output=True,
                                 text=True, timeout=20)
     except subprocess.TimeoutExpired:
-        return dict(ok=False, code='CALL_UI_TIMEOUT_RESULT_UNKNOWN', dial_entered=True,
+        return dict(ok=False, code='CALL_UI_TIMEOUT_RESULT_UNKNOWN', dial_entered=request['operation'] == 'start',
+                    accept_entered=request['operation'] == 'answer',
                     automatic_retry_allowed=False)
     if len(result.stdout) > 65536:
         raise ValueError('CALL_UI_RESPONSE_TOO_LARGE')
     try:
         value = json.loads(result.stdout)
     except ValueError:
-        return dict(ok=False, code='CALL_UI_RESPONSE_UNKNOWN', dial_entered=True,
+        return dict(ok=False, code='CALL_UI_RESPONSE_UNKNOWN', dial_entered=request['operation'] == 'start',
+                    accept_entered=request['operation'] == 'answer',
                     automatic_retry_allowed=False)
     if not isinstance(value, dict):
         raise ValueError('INVALID_CALL_UI_RESPONSE')
@@ -158,7 +160,7 @@ def start(account, chat, pid, process_time, request_id):
         raise ValueError('CALL_ALREADY_ACTIVE_OR_INCOMING')
     for old_path in root().glob('*.json'):
         old = read_record(old_path)
-        if old['status'] in ('prepared', 'dial_unknown'):
+        if old['status'] in ('prepared', 'dial_unknown', 'accept_unknown'):
             raise ValueError('PREVIOUS_CALL_RESULT_UNRESOLVED:' + old['request_id'])
         if old['status'] == 'active':
             old_live = observe(old)
@@ -205,6 +207,54 @@ def status(request_id):
     return dict(record, read_only=True, live=live, current_call_matches=matches,
                 current_state=live['active']['state'] if matches else None,
                 call_connection_verified=bool(matches and live.get('call_connection_verified')))
+
+
+def answer(account, pid, process_time, invitation_token, request_id):
+    if not re.fullmatch(r'[0-9a-f]{64}', invitation_token):
+        raise ValueError('INVALID_INCOMING_INVITATION_TOKEN')
+    path = record_path(request_id)
+    intent = dict(account=account, pid=pid, start_time=process_time, invitation_token=invitation_token)
+    if path.exists() or path.is_symlink():
+        record = read_record(path)
+        if record['intent'] != intent:
+            raise ValueError('CALL_REQUEST_ID_CONFLICT')
+        return dict(record, replayed=True)
+    keys = load_keys(account)
+    database_root = str(Path(keys['database_root']).resolve())
+    live = inspect(pid, process_time)
+    invitations = [v for v in live.get('incoming', []) if v['invitation_token'] == invitation_token]
+    if not live.get('ok') or live.get('active') or len(invitations) != 1:
+        raise ValueError('EXACT_INCOMING_INVITATION_NOT_FOUND')
+    for old_path in root().glob('*.json'):
+        old = read_record(old_path)
+        if old['status'] in ('prepared', 'dial_unknown', 'accept_unknown'):
+            raise ValueError('PREVIOUS_CALL_RESULT_UNRESOLVED:' + old['request_id'])
+    record = dict(intent=intent, request_id=request_id, database_root=database_root,
+                  invitation=invitations[0], ok=False, status='prepared', created_at=time.time(),
+                  transport='qt_atspi_niri', native_call_api_used=False,
+                  caller_identity_verified=False, participants_verified=False,
+                  invitation_performed=False, automatic_retry_allowed=False,
+                  call_connection_verified=False, remote_delivery_verified=False)
+    write_record(path, record)
+    entered = False
+    try:
+        with desktop_session():
+            entered = True
+            result = ui(dict(operation='answer', **intent, database_root=database_root))
+            if result.get('ok') and result.get('active'):
+                record.update(ok=True, status='active', handle=result['active']['handle'],
+                              accepted_invitation=True, last_observation=result,
+                              call_connection_verified=result['call_connection_verified'])
+            else:
+                record.update(status='accept_unknown' if result.get('accept_entered') else 'failed_no_accept',
+                              code=result.get('code', 'CALL_ACCEPT_RESULT_UNKNOWN'), last_observation=result)
+            write_record(path, record)
+    except Exception as error:
+        if record['status'] == 'prepared':
+            record['status'] = 'accept_unknown' if entered else 'failed_no_accept'
+        record.update(ok=False, code=str(error))
+    write_record(path, record)
+    return record
 
 
 def hangup(request_id):
@@ -283,6 +333,12 @@ def add_parser(operations):
             command.add_argument('--chat', required=True, help='Exact contact ID; ambiguous display labels are refused')
         if action == 'start':
             command.add_argument('--request-id', required=True)
+    command = actions.add_parser('answer', help='Accept one exact observed GUI invitation; caller authorization is separate')
+    command.add_argument('--account', default='me')
+    command.add_argument('--pid', type=int, required=True)
+    command.add_argument('--start-time', type=int, required=True)
+    command.add_argument('--invitation-token', required=True, help='Token from current call inspect; a caption is not a native caller ID')
+    command.add_argument('--request-id', required=True)
     for action in ('status', 'hangup'):
         command = actions.add_parser(action)
         command.add_argument('--request-id', required=True)
@@ -307,6 +363,8 @@ def run(args):
         if args.call_action == 'play':
             return play(args.request_id, args.file, args.audio_request_id, args.wait_seconds, args.source_output)
         with lock():
+            if args.call_action == 'answer':
+                return answer(args.account, args.pid, args.start_time, args.invitation_token, args.request_id)
             if args.call_action == 'resolve':
                 return resolve_ended(args.request_id)
             if args.call_action == 'open':

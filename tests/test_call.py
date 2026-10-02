@@ -8,6 +8,8 @@ from unittest.mock import patch
 from wechat_linux_cli import call
 from wechat_linux_cli._call_ui import Ui
 
+REAL_UI = call.ui
+
 
 class CallTests(unittest.TestCase):
     def setUp(self):
@@ -25,6 +27,7 @@ class CallTests(unittest.TestCase):
             (call, 'desktop_session', lambda: nullcontext()),
             (call, 'ui', self.ui),
             (call, 'process_start', lambda pid: 10),
+            (call, 'load_keys', lambda account: dict(database_root='/private/db')),
         ):
             mock = patch.object(module, name, side_effect=effect)
             mock.start()
@@ -34,7 +37,7 @@ class CallTests(unittest.TestCase):
         self.actions.append(request['operation'])
         if request['operation'] == 'inspect':
             return self.live
-        if request['operation'] == 'start':
+        if request['operation'] in ('start', 'answer'):
             return dict(ok=True, active=dict(handle=self.handle, state='ringing'),
                         call_connection_verified=False, dial_entered=True)
         return dict(ok=True, status='ended', hangup_observed=True)
@@ -163,8 +166,62 @@ class CallTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'CALL_NOT_CONFIRMED_ENDED'):
             call.resolve_ended('trial')
 
+    def test_answer_replays_without_accepting_a_second_invitation(self):
+        token = 'ab' * 32
+        self.live = dict(ok=True, active=None, incoming=[dict(invitation_token=token, caption='Test')])
+        result = call.answer('me', 123, 10, token, 'answer')
+        self.assertEqual(result['status'], 'active')
+        self.assertFalse(result['caller_identity_verified'])
+        self.assertFalse(result['invitation_performed'])
+        self.assertTrue(call.answer('me', 123, 10, token, 'answer')['replayed'])
+        self.assertEqual(self.actions.count('answer'), 1)
+
+    def test_old_invitation_token_is_refused_without_accept_input(self):
+        self.live = dict(ok=True, active=None, incoming=[dict(invitation_token='cd' * 32)])
+        with self.assertRaisesRegex(ValueError, 'EXACT_INCOMING_INVITATION_NOT_FOUND'):
+            call.answer('me', 123, 10, 'ab' * 32, 'answer')
+        self.assertNotIn('answer', self.actions)
+
+    def test_lost_accept_result_blocks_another_id(self):
+        token = 'ab' * 32
+        incoming = dict(ok=True, active=None, incoming=[dict(invitation_token=token)])
+        with patch.object(call, 'ui', side_effect=[incoming, dict(ok=False, accept_entered=True)]):
+            self.assertEqual(call.answer('me', 123, 10, token, 'answer')['status'], 'accept_unknown')
+        with self.assertRaisesRegex(ValueError, 'PREVIOUS_CALL_RESULT_UNRESOLVED'):
+            self.start('new')
+
+    def test_accept_transport_timeout_is_unknown(self):
+        import subprocess
+        with patch.object(call.subprocess, 'run', side_effect=subprocess.TimeoutExpired('helper', 20)):
+            result = REAL_UI(dict(operation='answer', pid=123, start_time=10))
+        self.assertTrue(result['accept_entered'])
+        self.assertFalse(result['dial_entered'])
+
 
 class QtStateTests(unittest.TestCase):
+    def test_incoming_window_uses_frame_size_instead_of_same_title_main_window(self):
+        ui = Ui.__new__(Ui)
+        rows = [dict(path='/popup', role='frame', name='微信', bounds=(0, 0, 300, 106))]
+        popup = dict(id=43, title='微信', layout=dict(window_size=[300, 106]))
+        ui.windows = lambda: [dict(id=42, title='微信', layout=dict(window_size=[838, 1017])), popup]
+        self.assertEqual(ui.invitation_window(rows, dict(frame='/popup'))['id'], 43)
+        ui.windows = lambda: [popup, dict(popup, id=44)]
+        with self.assertRaisesRegex(ValueError, 'INCOMING_WINDOW_NOT_UNIQUE'):
+            ui.invitation_window(rows, dict(frame='/popup'))
+
+    def test_replaced_accept_control_receives_no_keyboard_input(self):
+        ui = Ui.__new__(Ui)
+        ui.accept_entered = False
+        ui.focus = lambda window: None
+        ui.tree = lambda: [dict(showing=True, enabled=True, role='button', name='接听',
+                               frame='/popup', path='/accept/new')]
+        actions = []
+        ui.keys = lambda *args: actions.append(args)
+        with self.assertRaisesRegex(ValueError, 'CALL_CONTROL_OBJECT_CHANGED'):
+            ui.button(dict(id=43), '接听', '/popup', '/accept/old', accepting=True)
+        self.assertFalse(ui.accept_entered)
+        self.assertEqual(actions, [])
+
     def state(self, labels, buttons, other_labels=()):
         ui = Ui.__new__(Ui)
         ui.pid = 123
@@ -190,6 +247,37 @@ class QtStateTests(unittest.TestCase):
         result = self.state(['Test', '00:42'], ['挂断'])
         self.assertTrue(result['call_connection_verified'])
         self.assertEqual(result['active']['handle']['path'], '/call/1')
+
+    def test_incoming_token_ignores_animation_but_changes_with_widget(self):
+        ui = Ui.__new__(Ui)
+        ui.pid = 123
+        ui.request = dict(start_time=10)
+        ui.invitation_window = lambda rows, caption: dict(id=42)
+        caption = dict(role='label', name='Test邀请你语音通话.', showing=True, frame='/incoming/1',
+                       path='/caption/1', bus=':1.test')
+        accept = dict(role='button', name='接听', showing=True, enabled=True,
+                      frame='/incoming/1', path='/accept/1')
+        ui.tree = lambda: [caption, accept]
+        first = ui.inspect()['incoming'][0]
+        caption['name'] = 'Test邀请你语音通话...'
+        self.assertEqual(first['invitation_token'], ui.inspect()['incoming'][0]['invitation_token'])
+        caption['path'] = '/caption/2'
+        self.assertNotEqual(first['invitation_token'], ui.inspect()['incoming'][0]['invitation_token'])
+        self.assertFalse(first['caller_identity_verified'])
+
+    def test_changed_invitation_between_focus_and_accept_refuses_button(self):
+        ui = Ui.__new__(Ui)
+        ui.request = dict(invitation_token='original')
+        invitation = dict(invitation_token='original', frame='/incoming/1', window_id=42)
+        states = iter([dict(active=None, incoming=[invitation]), dict(active=None, incoming=[])])
+        ui.inspect = lambda: next(states)
+        ui.windows = lambda: [dict(id=42)]
+        ui.focus = lambda window: None
+        actions = []
+        ui.button = lambda *args: actions.append(args)
+        with self.assertRaisesRegex(ValueError, 'INCOMING_INVITATION_CHANGED'):
+            ui.answer()
+        self.assertEqual(actions, [])
 
 
 if __name__ == '__main__':
