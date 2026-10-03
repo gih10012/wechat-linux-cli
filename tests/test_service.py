@@ -53,6 +53,42 @@ class UnixServiceTests(unittest.TestCase):
                 self.assertFalse(client.call(request, self.path)['ok'])
         self.assertEqual(self.calls, [])
 
+    def test_image_socket_preserves_exact_target_path_and_rejects_extra_parameters(self):
+        request = {'operation': 'send_image', 'request_id': 'socket-image-01',
+                   'recipient': 'fixture@chatroom', 'file': '/owner/中文 $(literal).png'}
+        self.assertTrue(client.call(request, self.path)['ok'])
+        self.assertEqual(self.calls, [request])
+        for changed in ({**request, 'file': 'relative.png'}, {**request, 'text': 'extra'}):
+            self.assertFalse(client.call(changed, self.path)['ok'])
+        self.assertEqual(self.calls, [request])
+
+    def test_file_socket_accepts_exact_group_target_and_literal_unicode_path(self):
+        request = {'operation': 'send_file', 'request_id': 'socket-file-01',
+                   'recipient': 'fixture@chatroom', 'file': '/owner/文件 $(literal).zip'}
+        self.assertTrue(client.call(request, self.path)['ok'])
+        self.assertEqual(self.calls, [request])
+        for changed in ({**request, 'file': 'relative.png'}, {**request, 'text': 'extra'}):
+            self.assertFalse(client.call(changed, self.path)['ok'])
+        self.assertEqual(self.calls, [request])
+
+    def test_sticker_socket_preserves_exact_id_and_rejects_extra_payload(self):
+        request = {'operation': 'send_sticker', 'request_id': 'socket-sticker-01',
+                   'recipient': 'fixture@chatroom', 'file': '/owner/表情 $(literal).gif'}
+        self.assertTrue(client.call(request, self.path)['ok'])
+        for changed in ({**request, 'file': 'relative.gif'}, {**request, 'xml': 'extra'}):
+            self.assertFalse(client.call(changed, self.path)['ok'])
+        self.assertEqual(self.calls, [request])
+
+    def test_forward_socket_validates_precise_source_and_keeps_arbitrary_target(self):
+        request = {'operation': 'forward', 'request_id': 'forward-socket-01', 'account': 'me',
+                   'chat': 'fixture-source@chatroom', 'local_id': 42, 'database': 'message/message_0.db',
+                   'recipient': 'fixture-target@chatroom'}
+        self.assertTrue(client.call(request, self.path)['ok'])
+        self.assertEqual(self.calls, [request])
+        for change in ({'local_id': True}, {'local_id': 0}, {'chat': 'display name'},
+                       {'database': []}, {'text': 'extra'}):
+            self.assertFalse(client.call({**request, **change}, self.path)['ok'])
+        self.assertEqual(self.calls, [request])
     def test_conflicting_listener_is_rejected_without_unlinking_live_socket(self):
         with self.assertRaises(BlockingIOError):
             service.Service(self.path, lambda _: None)
@@ -69,6 +105,20 @@ class UnixServiceTests(unittest.TestCase):
         self.server.stopping = True
         self.assertEqual(self.server.dispatch({'operation': 'capture_keys', 'account': 'me',
                                                'seconds': 1})['code'], 'SERVICE_STOPPING')
+
+    def test_send_status_returns_new_acceptance_instead_of_cached_initial_result(self):
+        request_id = 'fresh-acceptance'
+        self.server.runner = Mock()
+        self.server.runner.state = {'last_request_id': request_id,
+                                    'last_result': {'recipient_delivery_verified': False}}
+        current = {'recipient_delivery_verified': True, 'server_message_id': '42',
+                   'read_only': True}
+        with patch.object(service.backend, 'inspect_trial', return_value=current), \
+                patch.object(service, 'completed', return_value=True):
+            result = client.call({'operation': 'send_status', 'request_id': request_id}, self.path)
+        self.assertTrue(result['recipient_delivery_verified'])
+        self.assertEqual(result['server_message_id'], '42')
+        self.server.runner.assert_not_called()
 
 
 class ShutdownTests(unittest.TestCase):

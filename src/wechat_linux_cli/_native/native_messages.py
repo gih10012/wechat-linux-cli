@@ -90,12 +90,13 @@ def message_body(row, max_chars):
         try:
             app = ET.fromstring(text).find('appmsg')
             if app is not None:
+                result['app_type'] = int(app.findtext('type') or '0')
                 text = app.findtext('title') or '[分享消息]'
                 url = app.findtext('url')
                 if url:
                     result['url'] = url[:4096]
                 result['description'] = (app.findtext('des') or '')[:max_chars]
-        except ET.ParseError:
+        except (ET.ParseError, ValueError):
             pass
     elif kind in (3, 34, 43, 47):
         text = {3: '[图片]', 34: '[语音]', 43: '[视频]', 47: '[表情]'}[kind]
@@ -152,6 +153,51 @@ def messages(keys, chat, limit=20, before=None, since=None, max_chars=1000):
             'order': 'newest_first', 'snapshots': snapshots, 'source': 'local_client_database',
             'coverage': 'messages already synced to this Linux client; media contents excluded',
             'server_sync_verified': False, 'marks_read': False}
+
+
+def forward_source(account, chat, local_id, database=None):
+    """Read one exact app-message source; no sending or modification."""
+    from .. import cards
+    if type(local_id) is not int or local_id <= 0:
+        raise ValueError('MESSAGE_ID_INVALID: a positive local message ID is required')
+    keys = load_keys(account)
+    names, _ = contact_names(keys)
+    chat_id = resolve_chat(keys, chat, names)
+    table = 'Msg_' + hashlib.md5(chat_id.encode()).hexdigest()
+    sources = sorted(f for f in keys['files'] if re.fullmatch(r'message/(?:biz_)?message_\d+\.db', f))
+    if len(sources) > 16:
+        raise ValueError('Too many message shards; narrow the source')
+    if database is not None:
+        if database not in sources:
+            raise ValueError('MESSAGE_DATABASE_INVALID: choose a captured message shard')
+        sources = [database]
+    found = []
+    for relative in sources:
+        conn, _ = open_database(keys, relative)
+        try:
+            if not conn.execute('SELECT 1 FROM sqlite_master WHERE type=? AND name=?', ('table', table)).fetchone():
+                continue
+            rows = conn.execute('SELECT m.local_id, m.server_id, m.local_type, m.message_content, '
+                                'm.compress_content, n.user_name AS sender_id FROM "' + table + '" m '
+                                'LEFT JOIN Name2Id n ON n.rowid=m.real_sender_id WHERE m.local_id=? LIMIT 2',
+                                (local_id,))
+            found.extend((relative, dict(row)) for row in rows)
+        finally:
+            conn.close()
+    if len(found) != 1:
+        raise ValueError('MESSAGE_NOT_UNIQUE: choose an existing local ID and its database shard')
+    relative, row = found[0]
+    if row['local_type'] & 0xffff != 49:
+        raise ValueError('FORWARD_TYPE_UNSUPPORTED: this route forwards app-message cards')
+    xml = decode_content(row['message_content'] or row['compress_content'])
+    sender = row.get('sender_id')
+    if sender and xml.startswith(sender + ':\n'):
+        xml = xml[len(sender) + 2:]
+    metadata = cards.parse_xml(xml.encode())
+    return {'ok': True, 'xml': xml, **metadata,
+            'source_identity': {'chat_id': chat_id, 'database': relative, 'local_id': local_id,
+                                'server_id': str(row['server_id'])},
+            'source': 'local_client_database', 'marks_read': False}
 
 
 def main(argv):

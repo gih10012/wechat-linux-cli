@@ -1,0 +1,261 @@
+#define NCUT_ALLOW_HIGHLEVEL_SEND 1
+#define NCUT_ALLOW_HIGHLEVEL_PREFLIGHT 1
+#include "../src/wechat_linux_cli/_native/native_highlevel_helper.c"
+
+static unsigned char app_object[16], services_object[16], manager_object[0x910];
+static unsigned char request_object[0x640];
+static int releases, requests, sends, result_destroys, recipient_assigns, text_assigns;
+static int bad_manager;
+static _Thread_local int active_context;
+static int require_context;
+static int missing_context;
+static int fake_context_available(void) { return !missing_context && (!require_context || active_context); }
+static void *observed_dispatcher;
+static int dispatcher_release_checks;
+#if NCUT_HIGHLEVEL_FILE_REQUEST || NCUT_HIGHLEVEL_STICKER_REQUEST
+static char fixture_file[] = "/tmp/wechat-native-file-XXXXXX";
+#endif
+static const char *fixture_value = "HELLO";
+static void fixture_payload(void) {
+    size_t length = strlen(fixture_value);
+    payload[0] = 10; payload[1] = 0;
+    payload[2] = length & 0xff; payload[3] = length >> 8;
+    memcpy(payload + 4, "filehelper", 10);
+    memcpy(payload + 14, fixture_value, length); payload_size = 14 + length;
+}
+
+static void fake_app(Shared *out) {
+    out->object = app_object; out->control = app_object;
+}
+static void fake_services(Shared *out, void *app) {
+    if (app != app_object) abort();
+    out->object = services_object; out->control = services_object;
+}
+static void fake_manager(Shared *out, void *services) {
+    if (require_context && !active_context) abort();
+    if (services != services_object) abort();
+    *(uintptr_t *)manager_object = bad_manager ? 1 : 0xa8bd418;
+    *(void **)(manager_object + 0x8f8) = app_object;
+    out->object = manager_object; out->control = manager_object;
+}
+static void fake_request(Shared *out, void *unused) {
+    if (unused) abort();
+    ++requests;
+    memset(request_object, 0, sizeof(request_object));
+    *(uintptr_t *)request_object = NCUT_HIGHLEVEL_STICKER_REQUEST ? 0xa89a068 : NCUT_HIGHLEVEL_FILE_REQUEST ? 0xa899f28 :
+                                  NCUT_HIGHLEVEL_IMAGE_REQUEST ? 0xa899fc8 : 0xa899f78;
+    *(uint32_t *)(request_object + 0x7c) = 1;
+    out->object = request_object; out->control = request_object;
+}
+static void fake_assign(void *dest, const void *bytes, size_t length) {
+    if (dest == request_object + 0x90 && length == 10 &&
+        !memcmp(bytes, "filehelper", length)) ++recipient_assigns;
+    else if (dest == request_object + ((NCUT_HIGHLEVEL_IMAGE_REQUEST || NCUT_HIGHLEVEL_FILE_REQUEST || NCUT_HIGHLEVEL_STICKER_REQUEST) ? 0xf0 : 0x5c8) &&
+             length == strlen(fixture_value) && !memcmp(bytes, fixture_value, length)) ++text_assigns;
+#if NCUT_HIGHLEVEL_FILE_REQUEST
+    else if (dest == request_object + 0x158 &&
+             length == strlen(strrchr(fixture_file, '/') + 1) &&
+             !memcmp(bytes, strrchr(fixture_file, '/') + 1, length)) { /* filename */ }
+#endif
+    else abort();
+}
+static void fake_send(void *out, void *manager, const Shared *request) {
+    if (manager != manager_object || request->object != request_object ||
+        *(uint32_t *)(request_object + 0xe4) !=
+            (NCUT_HIGHLEVEL_STICKER_REQUEST ? 47 : NCUT_HIGHLEVEL_FILE_REQUEST ? 49 : NCUT_HIGHLEVEL_IMAGE_REQUEST ? 3 : 1)) abort();
+#if NCUT_HIGHLEVEL_STICKER_REQUEST
+    if (*(void **)(request_object + 0x5c8) || *(void **)(request_object + 0x5d0) ||
+        *(void **)(request_object + 0x5d8) || *(void **)(request_object + 0x5e0)) abort();
+#endif
+#if NCUT_HIGHLEVEL_FILE_REQUEST
+    if (*(uint32_t *)(request_object + 0xe8) != 6 ||
+        *(uint64_t *)(request_object + 0x170) != 5) abort();
+#endif
+    ++sends;
+    memset(out, 0, 0x30);
+}
+static void fake_result_destroy(void *out) {
+    if (*(uint32_t *)out || *((uint32_t *)out + 1)) abort();
+    ++result_destroys;
+}
+static void fake_shared_destroy(Shared *item) {
+    if (!item->object || !item->control) abort();
+    if (item->object == observed_dispatcher) {
+        if (dispatch_pending) {
+            char json[512] = {0};
+            if (output_fd < 0) abort();
+            if (!report_failed &&
+                (pread(output_fd, json, sizeof(json)-1, 0) <= 0 ||
+                 !strstr(json, "\"worker_done\":false") ||
+                 !strstr(json, "\"dispatch_pending\":true"))) abort();
+            ++dispatcher_release_checks;
+        }
+    }
+    ++releases;
+    item->object = item->control = NULL;
+}
+
+static void run_case(int send, int mismatched_manager, int expected_failure,
+                     int expected_requests, int expected_sends, int expected_releases,
+                     int bad_output) {
+    char report_path[] = "/tmp/wechat-highlevel-fixture-report-XXXXXX";
+    output_fd = bad_output ? open("/dev/full", O_WRONLY) : mkstemp(report_path);
+    if (output_fd < 0) abort();
+    releases = requests = sends = result_destroys = recipient_assigns = text_assigns = 0;
+    worker_done = manager_verified = request_constructed = 0;
+    submission_entered = result_returned = result_success = failure = 0;
+    report_failed = 0;
+    result_code0 = result_code1 = 0;
+    bad_manager = mismatched_manager;
+    should_send = send;
+    fixture_payload();
+    perform_native();
+    if (!worker_done || failure != expected_failure || requests != expected_requests ||
+        sends != expected_sends || releases != expected_releases ||
+        result_destroys != expected_sends ||
+        recipient_assigns != expected_requests || text_assigns != expected_requests ||
+        submission_entered != (bad_output ? 1 : expected_sends) ||
+        result_returned != expected_sends ||
+        result_success != expected_sends) abort();
+    if (!bad_output) unlink(report_path);
+}
+
+static unsigned char dispatcher_object[32], job_object[16];
+static unsigned char scheduler_object[0x118], coroutine_object[16];
+static TaskCallback *queued;
+static TaskCallback inline_copy;
+static int enqueue_calls, synchronous, dispatch_send;
+static void *fake_global_app(void) { return app_object; }
+static void fake_dispatcher(Shared *out, void *app) {
+    if (app != app_object) abort();
+    *out = (Shared){dispatcher_object, dispatcher_object};
+}
+static void fake_enqueue(Shared *out, void *dispatcher, const SourceLocation *source,
+                         TaskFunction *function, int label_number) {
+    if (dispatcher != dispatcher_object || label_number != 1 || !source->file ||
+        !source->function || source->line != 1) abort();
+    ++enqueue_calls;
+    if (synchronous) {
+        active_context = 1;
+        function->target->vtable->invoke(function->target);
+        active_context = 0;
+        function->target->vtable->delete_self(function->target);
+        function->target = NULL;
+        if (output_fd < 0 || !dispatch_pending) abort();
+        *out = (Shared){job_object, job_object};
+        return;
+    }
+    queued = function->target->vtable->clone(function->target);
+    function->target->vtable->clone_into(function->target, &inline_copy);
+    *out = (Shared){job_object, job_object};
+}
+static void *run_queued(void *unused) {
+    (void)unused;
+    active_context = 1;
+    queued->vtable->invoke(queued);
+    inline_copy.vtable->invoke(&inline_copy);
+    active_context = 0;
+    queued->vtable->delete_self(queued);
+    return NULL;
+}
+static void run_dispatch_case(int cancel, int bad_output, int missing_scheduler) {
+    char path[] = "/tmp/wechat-highlevel-dispatch-XXXXXX";
+    output_fd = bad_output ? open("/dev/full", O_WRONLY) : mkstemp(path);
+    if (output_fd < 0) abort();
+    releases = requests = sends = enqueue_calls = 0;
+    worker_done = manager_verified = request_constructed = failure = 0;
+    submission_entered = result_returned = result_success = 0;
+    live_callbacks = dispatch_pending = enqueue_returned = task_invoked = report_failed = 0;
+    retained_dispatcher = (Shared){0};
+    should_send = dispatch_send; bad_manager = 0;
+    require_context = 1;
+    observed_dispatcher = dispatcher_object;
+    dispatcher_release_checks = 0;
+    fixture_payload();
+    *(void **)(dispatcher_object + 0x10) = missing_scheduler == 1 ? NULL : scheduler_object;
+    *(void **)dispatcher_object = coroutine_object;
+    *(uintptr_t *)scheduler_object = missing_scheduler == 3 ? 0 : 0xaaaea98;
+    *(uintptr_t *)coroutine_object = missing_scheduler == 4 ? 0 : 0xaaacf80;
+    *(void **)(scheduler_object + 0xf0) = missing_scheduler == 5 ? NULL : coroutine_object;
+    scheduler_object[0xa9] = missing_scheduler == 2 ? 1 : 0;
+    dispatch_api = (DispatchApi){fake_global_app, fake_dispatcher, fake_enqueue, 0xaaaea98, 0xaaacf80};
+    int code = enqueue_prepared();
+    if (missing_scheduler || bad_output) {
+        if (code != (missing_scheduler >= 3 ? EPROTO : missing_scheduler == 2 ? ECANCELED : missing_scheduler ? ENOTCONN : EIO) || enqueue_calls ||
+            failure != (missing_scheduler >= 3 ? 13 : missing_scheduler == 2 ? 12 : missing_scheduler ? 9 : 7) || !worker_done ||
+            live_callbacks || output_fd != -1 || releases != 1) abort();
+    } else if (synchronous) {
+        if (code || !worker_done || requests != 1 || sends != dispatch_send || failure ||
+            live_callbacks || dispatch_pending || output_fd != -1 || releases != 6)
+            abort();
+    } else {
+        if (code || worker_done || requests || live_callbacks != 2 || releases != 1)
+            abort();
+        if (cancel) queued->vtable->delete_self(queued);
+        else {
+            pthread_t thread;
+            if (pthread_create(&thread, NULL, run_queued, NULL) ||
+                pthread_join(thread, NULL)) abort();
+            if (!worker_done || requests != 1 || sends != dispatch_send || failure) abort();
+        }
+        /* A remaining inline clone must retain the dispatcher and report fd. */
+        if (live_callbacks != 1 || output_fd < 0 || !retained_dispatcher.control)
+            abort();
+        inline_copy.vtable->destroy(&inline_copy);
+        if (live_callbacks || !worker_done || output_fd != -1 ||
+            retained_dispatcher.control || failure != (cancel ? 11 : 0) ||
+            releases != (cancel ? 2 : 6)) abort();
+    }
+    require_context = 0;
+    if (!missing_scheduler && dispatcher_release_checks != 1) abort();
+    observed_dispatcher = NULL;
+    if (!bad_output) unlink(path);
+}
+
+int main(void) {
+#if NCUT_HIGHLEVEL_FILE_REQUEST || NCUT_HIGHLEVEL_STICKER_REQUEST
+    int file_fd = mkstemp(fixture_file);
+    if (file_fd < 0 || write(file_fd, "HELLO", 5) != 5 || close(file_fd)) abort();
+    fixture_value = fixture_file;
+#endif
+    Shared context = {0};
+    if (active_context_valid(NULL) || active_context_valid(&context)) abort();
+    context.object = app_object;
+    if (active_context_valid(&context)) abort();
+    context.object = NULL; context.control = app_object;
+    if (active_context_valid(&context)) abort();
+    context.object = app_object;
+    if (!active_context_valid(&context)) abort();
+    *(intptr_t *)(app_object + 8) = -1;
+    if (active_context_valid(&context)) abort();
+    *(intptr_t *)(app_object + 8) = 0;
+    context_available = fake_context_available;
+    image_base = 0;
+    api = (NativeApi){fake_app, fake_services, fake_manager, fake_request,
+                      fake_assign, fake_send, fake_result_destroy, fake_shared_destroy};
+    missing_context = 1;
+    run_case(0, 0, 14, 0, 0, 0, 0);
+    missing_context = 0;
+    run_case(0, 0, 0, 1, 0, 4, 0);
+    run_case(1, 0, 0, 1, 1, 4, 0);
+    run_case(1, 1, 4, 0, 0, 3, 0);
+    run_case(1, 0, 7, 1, 0, 4, 1);
+    run_dispatch_case(0, 0, 0);
+    run_dispatch_case(1, 0, 0);
+    run_dispatch_case(0, 1, 0);
+    run_dispatch_case(0, 0, 1);
+    run_dispatch_case(0, 0, 2);
+    run_dispatch_case(0, 0, 3);
+    run_dispatch_case(0, 0, 4);
+    run_dispatch_case(0, 0, 5);
+    dispatch_send = 1;
+    run_dispatch_case(0, 0, 0);
+    dispatch_send = 0;
+    synchronous = 1;
+    run_dispatch_case(0, 0, 0);
+    puts("highlevel fixture passed");
+#if NCUT_HIGHLEVEL_FILE_REQUEST || NCUT_HIGHLEVEL_STICKER_REQUEST
+    unlink(fixture_file);
+#endif
+    return 0;
+}

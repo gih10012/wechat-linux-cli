@@ -1,7 +1,6 @@
 """Serial owner-scoped Unix service, intended for systemd CAP_SYS_PTRACE execution."""
 import argparse
 import fcntl
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,6 +16,7 @@ import re
 
 from . import __version__
 from ._native import native_send_candidate as native
+from . import backend
 from .backend import completed
 from .client import socket_path
 
@@ -59,7 +59,7 @@ def process_start(pid):
 
 
 def trial_work(request_id):
-    return native.runtime_root(Path.home()) / native.trial_name(request_id)
+    return backend.work_for(request_id)
 
 
 def before_injection(request_id):
@@ -68,10 +68,23 @@ def before_injection(request_id):
     run_injection writes config.json before launching GDB. All later stages,
     including a crashed caller with an unrecorded debugger PID, leave it here.
     """
-    work = trial_work(request_id)
-    return not any((work/name).exists() for name in
-                   ('config.json', 'debugger-process.json', 'injection.json',
-                    'worker.json', 'worker.json.arm'))
+    names = ('config.json', 'debugger-process.json', 'injection.json',
+             'worker.json', 'worker.json.arm')
+    if any((work/name).exists() for work in
+           (trial_work(request_id), backend.legacy_work(request_id)) for name in names):
+        return False
+    preflight = backend.highlevel.work_for(backend.preflight_id(request_id), send=False)
+    if not any((preflight/name).exists() for name in names):
+        return True
+    # A construction-only call can also be pending. Its saved configuration
+    # must not be mistaken for proof that no native call has happened.
+    try:
+        proof = backend.highlevel.inspect_trial(backend.preflight_id(request_id), send=False)
+        config = read_private(preflight/'config.json')
+        return (backend.settled(proof) and not proof['worker'].get('submission_entered')
+                and native.process_running_untraced(config['pid'], config['start_time']))
+    except (OSError, ValueError, KeyError):
+        return False
 
 
 def terminal_preflight(result, request_id):
@@ -79,7 +92,7 @@ def terminal_preflight(result, request_id):
         return False
     return (result.get('status') == 'local_failure'
             and result.get('stage') in ('prepare_executable', 'compile_helper')
-            or result.get('code') == 'NATIVE_OPERATION_FAILED')
+            or result.get('code') in ('NATIVE_OPERATION_FAILED', 'REQUEST_ID_CONFLICT', 'REQUEST_PENDING'))
 
 
 class Runner:
@@ -131,7 +144,7 @@ class Runner:
         if not isinstance(result, dict):
             return {'ok': False, 'code': 'NATIVE_RESULT_UNREADABLE', 'pending': pending,
                     'automatic_retry_allowed': False}
-        if completed(result) or terminal_preflight(result, request['request_id']):
+        if backend.settled(result) or terminal_preflight(result, request['request_id']):
             self.state = {'last_request_id': request['request_id'], 'last_result': result,
                           'pending': None}
             save(self.state_path, self.state)
@@ -165,7 +178,7 @@ class Runner:
             Path(pending['result_file']).unlink(missing_ok=True)
             return {'ok': True, 'pending': None, 'result': result, 'read_only': True}
         try:
-            native_result = native.inspect_trial(request_id)
+            native_result = backend.inspect_trial(request_id)
             config = read_private(Path(native_result['result_path']).parent/'config.json')
             # A recorded old client flag cannot prove the client is untraced now.
             native_result['client_running_untraced'] = native.process_running_untraced(
@@ -173,12 +186,13 @@ class Runner:
             if (native_result.get('status') in ('worker_pending', 'callback_pending')
                     and native_result.get('worker', {}).get('worker_done')):
                 native_result['status'] = 'trial_finished'
-            done = completed(native_result)
+            done = backend.settled(native_result)
         except (OSError, ValueError, KeyError, TypeError):
             native_result, done = None, False
         if not done:
             return {'ok': False, 'code': 'PENDING_REQUIRES_INSPECTION', 'pending': pending,
                     'result': native_result, 'automatic_retry_allowed': False}
+        native_result['ok'] = completed(native_result)
         self.state = {'last_request_id': request_id, 'last_result': native_result,
                       'pending': None}
         save(self.state_path, self.state)
@@ -251,34 +265,44 @@ class Service:
             return self.runner.capture_keys(request)
         if operation == 'send_status' and set(request) == {'operation', 'request_id'}:
             native.make_payload(0, 'validate identifier', request['request_id'])
+            try:
+                result = backend.inspect_trial(request['request_id'])
+                return {**result, 'ok': completed(result)}
+            except (OSError, ValueError):
+                pass
             state = getattr(self.runner, 'state', {})
             if (state.get('last_request_id') == request['request_id']
                     and state.get('last_result')):
                 return {'ok': True, 'read_only': True, **state['last_result']}
-            result = native.inspect_trial(request['request_id'])
-            return {'ok': True, **result}
-        if operation != 'send_text' or set(request) != {'operation', 'text', 'request_id', 'recipient'}:
+            return {**backend.inspect_trial(request['request_id']), 'ok': False}
+        if operation == 'forward':
+            if set(request) != {'operation', 'account', 'chat', 'local_id', 'database', 'recipient', 'request_id'}:
+                raise ValueError('Unsupported forward parameters')
+            native.make_payload(int(time.time()), 'forward source', request['request_id'], request['recipient'])
+            backend.highlevel.payload_for(request['chat'], 'source')
+            if (not isinstance(request['account'], str) or not request['account']
+                    or type(request['local_id']) is not int or request['local_id'] <= 0
+                    or request['database'] is not None and not isinstance(request['database'], str)):
+                raise ValueError('Invalid forward source')
+            if request['request_id'] == native.REQUEST_ID:
+                raise ValueError('The legacy fixed acceptance ID cannot be submitted')
+            if self.stopping:
+                return {'ok': False, 'code': 'SERVICE_STOPPING'}
+            return self.runner(request)
+        field = {'send_text': 'text', 'send_image': 'file', 'send_file': 'file', 'send_xml': 'file',
+                 'send_sticker': 'file'}.get(operation)
+        if field is None or set(request) != {'operation', field, 'request_id', 'recipient'}:
             raise ValueError('Unsupported operation or parameters')
         # Protocol validation occurs before starting any backend process.
-        native.make_payload(int(time.time()), request['text'], request['request_id'], request['recipient'])
+        native.make_payload(int(time.time()), request[field], request['request_id'], request['recipient'])
+        if field == 'file':
+            backend.media.image_path(request[field])
         if request['request_id'] == native.REQUEST_ID:
             raise ValueError('The legacy fixed acceptance ID cannot be submitted')
-        work = trial_work(request['request_id'])
-        if work.exists():
-            recorded = read_private(work/'request.json')
-            fingerprint = hashlib.sha256(request['text'].encode()).hexdigest()
-            if (recorded.get('text_sha256') != fingerprint
-                    or recorded.get('recipient') != request['recipient']
-                    or recorded.get('send') is not True):
-                return {'ok': False, 'code': 'REQUEST_ID_CONFLICT',
-                        'automatic_retry_allowed': False}
-            try:
-                result = native.inspect_trial(request['request_id'])
-            except (OSError, ValueError):
-                return {'ok': False, 'code': 'REQUEST_PENDING',
-                        'automatic_retry_allowed': False}
-            return {**result, 'ok': completed(result), 'replayed': True,
-                    'local_history_integrated': False}
+        previous = backend.replay(request)
+        if previous is not None:
+            return previous
+        backend.highlevel.payload_for(request['recipient'], request[field])
         if self.stopping:
             return {'ok': False, 'code': 'SERVICE_STOPPING'}
         return self.runner(request)
