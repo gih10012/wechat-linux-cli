@@ -113,10 +113,17 @@ def prepare_group(account, chat, pid, process_time, members):
 def ui(request):
     if process_start(request['pid']) != request['start_time']:
         raise ValueError('CALL_PROCESS_CHANGED')
+    # Group selection verifies every requested member and can include a fresh
+    # chat search. The private-call deadline can expire with the final button
+    # focused but before any invitation. Budget for the bounded member count;
+    # timeout still records an unknown outcome and never retries the action.
+    timeout = 20
+    if request['operation'] in ('start', 'group_prepare') and request.get('target', {}).get('group'):
+        timeout += 12 * len(request['group_spec']['members'])
     try:
         result = subprocess.run(['/usr/bin/python3', '-I', str(Path(__file__).with_name('_call_ui.py'))],
                                 input=json.dumps(request, ensure_ascii=False), capture_output=True,
-                                text=True, timeout=20)
+                                text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return dict(ok=False, code='CALL_UI_TIMEOUT_RESULT_UNKNOWN', dial_entered=request['operation'] == 'start',
                     accept_entered=request['operation'] == 'answer',

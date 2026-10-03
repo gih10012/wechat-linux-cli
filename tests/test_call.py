@@ -55,6 +55,24 @@ class CallTests(unittest.TestCase):
         self.assertEqual(self.actions.count('start'), 1)
         self.assertEqual(call.record_path('trial').stat().st_mode & 0o777, 0o600)
 
+    def test_group_search_and_member_verification_can_finish_after_private_deadline(self):
+        import json
+        import subprocess
+        def slow_selection(*args, **kwargs):
+            if kwargs['timeout'] <= 24:
+                raise subprocess.TimeoutExpired('helper', kwargs['timeout'])
+            return subprocess.CompletedProcess([], 0, json.dumps(dict(ok=True, invitation_performed=False)))
+        group = dict(operation='group_prepare', pid=123, start_time=10,
+                     target=dict(group=True), group_spec=dict(members=[{}, {}]))
+        with patch.object(call.subprocess, 'run', side_effect=slow_selection):
+            self.assertTrue(REAL_UI(group)['ok'])
+            private = REAL_UI(dict(operation='start', pid=123, start_time=10,
+                                   target=dict(group=False)))
+            self.assertFalse(private['ok'])
+            self.assertEqual(private['code'], 'CALL_UI_TIMEOUT_RESULT_UNKNOWN')
+            self.assertTrue(private['dial_entered'])
+            self.assertFalse(private['automatic_retry_allowed'])
+
     def test_changed_target_conflicts_without_navigation(self):
         self.start()
         count = len(self.actions)

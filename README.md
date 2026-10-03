@@ -208,6 +208,9 @@ selection have been tested in the owner's normal client. `start` uses the
 same checks and then submits the normal selector once. It accepts one to eight
 distinct other members and binds the sorted set to the request ID; the same ID
 cannot change members or repeat an invitation. Calling an entire group by
-default is refused. Group invitation and hangup require separate runtime
-acceptance. Group status reports `group_connection_unverified`; `call play`
+default is refused. The UI deadline scales with the selected-member count to
+cover fresh chat search and each checkbox verification. Installed two-member
+invitation, normal hangup and replay have been tested; independent synced group
+history contains one start and one end. Group status reports
+`group_connection_unverified`; `call play`
 refuses group playback until a reliable remote-join check is implemented.
